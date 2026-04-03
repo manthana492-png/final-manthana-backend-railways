@@ -1,0 +1,23 @@
+{
+  "overrides": [
+    {
+      "files": [
+        "manthana-radio-frontend/**/*.{ts,tsx}"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../lib/types", "../../lib/types"],
+                "message": "Use shared @manthana/api types instead of per-app types."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
+

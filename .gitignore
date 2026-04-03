@@ -4,3 +4,28 @@
 /.bash_history
 /.zsh_history
 /.gitconfig
+
+# Lightning / IDE / tool installs (symlinks to huge trees — cause 10k+ “changes” in SCM)
+/.cursor-server
+/.vscode-server
+/.windsurf-server
+/.cursor/
+/.vscode/
+/.idea/
+/.lightning_studio/
+
+# Caches & package stores
+/.cache/
+/.npm/
+/.pnpm-store/
+/.nv/
+
+# Local ML / data caches (not app source)
+/.medmnist/
+/.torchxrayvision/
+/.totalsegmentator/
+
+# Python / misc
+/__pycache__/
+*.py[cod]
+.bash_history*.tmp
