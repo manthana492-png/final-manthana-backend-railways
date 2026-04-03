@@ -75,4 +75,3 @@ export async function DELETE(
 ) {
   return proxy(req, params.path);
 }
-

@@ -2,6 +2,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import type { AnalysisResponse, ScanStage, ImageScan } from "@/lib/types";
 import { analyzeImage } from "@/lib/api";
+import { AnalysisCancelledError } from "@/lib/errors";
 
 interface MultiScanState {
   images: ImageScan[];
@@ -180,11 +181,12 @@ export function useAnalysis() {
         apiModality,
         undefined,
         clinicalNotes,
-        patientContext
+        patientContext,
+        ctrl.signal
       );
       if (ctrl.signal.aborted) return;
 
-      let result: AnalysisResponse = initial as AnalysisResponse;
+      const result: AnalysisResponse = initial;
 
       updateImage({ stage: "heatmap", detectedModality: result.modality });
       await delay(600);
@@ -196,7 +198,7 @@ export function useAnalysis() {
 
       updateImage({ stage: "complete", result, detectedModality: result.modality });
     } catch (error) {
-      if (ctrl.signal.aborted) return;
+      if (error instanceof AnalysisCancelledError || ctrl.signal.aborted) return;
       updateImage({
         stage: "error",
         error: error instanceof Error ? error.message : "Analysis failed. Please try again.",

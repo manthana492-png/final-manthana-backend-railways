@@ -213,9 +213,9 @@ Returns 18 pathology probabilities (same CheXpert labels as MedRAX-2).
 
 #### Frontend (Optional Enhancement)
 
-##### [MODIFY] [types.ts](file:///d:/new%20manthana%20radiology/manthana-scan/lib/types.ts)
+##### [MODIFY] [types.ts](../manthana-radio-frontend/lib/types.ts)
 
-**Add to [AnalysisResponse](file:///d:/new%20manthana%20radiology/manthana-scan/lib/types.ts#29-43) interface (line 41):**
+**Add to [AnalysisResponse](../manthana-radio-frontend/lib/types.ts#29-43) interface (line 41):**
 
 ```typescript
 ensemble_agreement?: number;  // 0-1, how much models agreed
@@ -302,11 +302,11 @@ async def analyze(modality, file, patient_id, token_data):
 
 #### Frontend
 
-##### [MODIFY] [useAnalysis.ts](file:///d:/new%20manthana%20radiology/manthana-scan/hooks/useAnalysis.ts)
+##### [MODIFY] [useAnalysis.ts](../manthana-radio-frontend/hooks/useAnalysis.ts)
 
-**No changes needed.** The hook already handles whatever [AnalysisResponse](file:///d:/new%20manthana%20radiology/manthana-scan/lib/types.ts#29-43) shape the backend sends. The `analysis_depth` field is an optional addition to the type, and the UI already shows all findings regardless.
+**No changes needed.** The hook already handles whatever [AnalysisResponse](../manthana-radio-frontend/lib/types.ts#29-43) shape the backend sends. The `analysis_depth` field is an optional addition to the type, and the UI already shows all findings regardless.
 
-**Optional:** Add a small visual indicator in the scan stage animation — if `analysis_depth === "triage"`, the animation completes faster (skip heatmap/extracting stages). This is ~5 lines of change in the [scanSingleImage](file:///d:/new%20manthana%20radiology/manthana-scan/hooks/useAnalysis.ts#90-201) function but not required.
+**Optional:** Add a small visual indicator in the scan stage animation — if `analysis_depth === "triage"`, the animation completes faster (skip heatmap/extracting stages). This is ~5 lines of change in the [scanSingleImage](../manthana-radio-frontend/hooks/useAnalysis.ts#90-201) function but not required.
 
 ---
 
@@ -477,9 +477,9 @@ def find_correlations(individual_results: list[dict]) -> list[dict]:
 
 #### Frontend
 
-##### [MODIFY] [types.ts](file:///d:/new%20manthana%20radiology/manthana-scan/lib/types.ts)
+##### [MODIFY] [types.ts](../manthana-radio-frontend/lib/types.ts)
 
-**Add to [UnifiedAnalysisResult](file:///d:/new%20manthana%20radiology/manthana-scan/lib/types.ts#140-158) interface (after line 155):**
+**Add to [UnifiedAnalysisResult](../manthana-radio-frontend/lib/types.ts#140-158) interface (after line 155):**
 
 ```typescript
 correlations?: {
@@ -491,7 +491,7 @@ correlations?: {
 }[];
 ```
 
-##### [NEW] [components/analysis/CorrelationCard.tsx](file:///d:/new%20manthana%20radiology/manthana-scan/components/analysis/CorrelationCard.tsx)
+##### [NEW] [components/analysis/CorrelationCard.tsx](../manthana-radio-frontend/components/analysis/CorrelationCard.tsx)
 
 **What it does:** Renders a cross-modality correlation finding as a highlighted card in the unified results view. Shows which modalities contributed, the confidence, and recommended clinical action. Uses existing design system (glassmorphism, severity colors).
 
@@ -622,16 +622,16 @@ model = ManagedModel(
 | 6 | [services/01_body_xray/pipeline_chest.py](file:///d:/new%20manthana%20radiology/manthana-backend/services/01_body_xray/pipeline_chest.py) | 2 | Add EVA-X ensemble + wire CheXagent |
 | 7 | [gateway/main.py](file:///d:/new%20manthana%20radiology/manthana-backend/gateway/main.py) | 3,6 | Add triage layer + admin router |
 | 8 | [services/report_assembly/main.py](file:///d:/new%20manthana%20radiology/manthana-backend/services/report_assembly/main.py) | 5 | Add correlation engine before DeepSeek |
-| 9 | [manthana-scan/lib/types.ts](file:///d:/new%20manthana%20radiology/manthana-scan/lib/types.ts) | 2,5 | Add ensemble_agreement + correlations |
+| 9 | [manthana-radio-frontend/lib/types.ts](../manthana-radio-frontend/lib/types.ts) | 2,5 | Add ensemble_agreement + correlations |
 | 10 | [docker-compose.yml](file:///d:/new%20manthana%20radiology/manthana-backend/docker-compose.yml) | 1 | Add model_cache volume to all services |
 
 ## Frontend Changes Summary
 
 | File | Lines Changed | Phase |
 |------|:---:|:---:|
-| [lib/types.ts](file:///d:/new%20manthana%20radiology/manthana-scan/lib/types.ts) | +5 | 2, 5 |
+| [lib/types.ts](../manthana-radio-frontend/lib/types.ts) | +5 | 2, 5 |
 | `components/analysis/CorrelationCard.tsx` | +40 (new) | 5 |
-| [hooks/useAnalysis.ts](file:///d:/new%20manthana%20radiology/manthana-scan/hooks/useAnalysis.ts) | +5 (optional) | 3 |
+| [hooks/useAnalysis.ts](../manthana-radio-frontend/hooks/useAnalysis.ts) | +5 (optional) | 3 |
 | **Total** | **~50 lines** | |
 
 > [!NOTE]

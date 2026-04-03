@@ -9,6 +9,7 @@ import type {
   AnalysisResponse,
 } from "@/lib/types";
 import { analyzeImage, requestUnifiedReport } from "@/lib/api";
+import { AnalysisCancelledError } from "@/lib/errors";
 
 const INITIAL_SESSION: MultiModelSession = {
   id: "",
@@ -120,7 +121,14 @@ export function useMultiModelAnalysis() {
           const file = upload.files[0];
           if (!file) continue;
 
-          const result = await analyzeImage(file, upload.modality);
+          const result = await analyzeImage(
+            file,
+            upload.modality,
+            undefined,
+            undefined,
+            undefined,
+            ctrl.signal
+          );
 
           if (ctrl.signal.aborted) return;
 
@@ -129,8 +137,8 @@ export function useMultiModelAnalysis() {
             ...s,
             individualResults: [...results],
           }));
-        } catch {
-          if (ctrl.signal.aborted) return;
+        } catch (err) {
+          if (err instanceof AnalysisCancelledError || ctrl.signal.aborted) return;
 
           // Use mock result on API failure (demo mode)
           const mockResult: AnalysisResponse = {

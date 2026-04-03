@@ -4,4 +4,3 @@ export class AnalysisCancelledError extends Error {
     this.name = "AnalysisCancelledError";
   }
 }
-

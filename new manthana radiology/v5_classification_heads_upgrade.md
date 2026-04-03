@@ -24,8 +24,8 @@ Manthana serves **individual Indian doctors** — allopathy, Ayurveda, Unani, Si
 
 `models_used` arrays currently contain real model names like `"MedRAX-2"`, `"CheXagent-8b"`, `"TotalSegmentator"`, `"DeepSeek-V3"`, `"Virchow"`. These appear in:
 - API JSON responses → visible to anyone inspecting network traffic
-- [IntelligencePanel.tsx](file:///d:/new%20manthana%20radiology/manthana-scan/components/findings/IntelligencePanel.tsx) → renders model names as badges
-- [UnifiedReportPanel.tsx](file:///d:/new%20manthana%20radiology/manthana-scan/components/findings/UnifiedReportPanel.tsx) → shows model names in unified report
+- [IntelligencePanel.tsx](../manthana-radio-frontend/components/findings/IntelligencePanel.tsx) → renders model names as badges
+- [UnifiedReportPanel.tsx](../manthana-radio-frontend/components/findings/UnifiedReportPanel.tsx) → shows model names in unified report
 
 ### The Fix
 
@@ -71,7 +71,7 @@ result["models_used"] = _obfuscate_model_names(result.get("models_used", []))
 > [!IMPORTANT]
 > Keep the FDA reference numbers visible (K243779, K242295) — they're publicly documented clearance numbers, not model identifiers, and showing them adds credibility.
 
-#### [MODIFY] [useAnalysis.ts](file:///d:/new%20manthana%20radiology/manthana-scan/hooks/useAnalysis.ts)
+#### [MODIFY] [useAnalysis.ts](../manthana-radio-frontend/hooks/useAnalysis.ts)
 
 Remove hardcoded model names from fallback/demo data:
 
@@ -83,7 +83,7 @@ models_used: ["MedRAX-2", "CheXagent-8b", "TotalSegmentator"],
 models_used: ["Manthana CXR Engine", "Manthana Report AI"],
 ```
 
-#### [MODIFY] [useMultiModelAnalysis.ts](file:///d:/new%20manthana%20radiology/manthana-scan/hooks/useMultiModelAnalysis.ts)
+#### [MODIFY] [useMultiModelAnalysis.ts](../manthana-radio-frontend/hooks/useMultiModelAnalysis.ts)
 
 ```typescript
 // BEFORE:

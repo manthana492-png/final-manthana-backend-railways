@@ -6,6 +6,9 @@ export const BRAND = "Manthana Radiologist Copilot";
 export const GATEWAY_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000";
 
+/** Same-origin proxy base (`app/api/[...path]/route.ts`) — optional; main client still uses `GATEWAY_URL` + JWT. */
+export const API_BASE = "/api";
+
 export const MODALITIES: Modality[] = [
   {
     id: "auto",

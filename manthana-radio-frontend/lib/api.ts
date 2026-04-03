@@ -2,6 +2,7 @@
 import { GATEWAY_URL } from "./constants";
 import { getGatewayAuthToken } from "./auth-token";
 import type { AnalysisResponse, JobStatus, ServiceHealth, UnifiedAnalysisResult } from "./types";
+import { AnalysisCancelledError } from "./errors";
 
 const FRONTEND_TO_BACKEND_MODALITY: Record<string, string> = {
   xray: "xray",
@@ -24,6 +25,7 @@ const FRONTEND_TO_BACKEND_MODALITY: Record<string, string> = {
   cytology: "cytology",
   oral_cancer: "oral_cancer",
   lab_report: "lab_report",
+  dermatology: "dermatology",
   abdominal_ct: "abdominal_ct",
   chest_ct: "chest_ct",
   cardiac_ct: "cardiac_ct",
@@ -33,6 +35,57 @@ const FRONTEND_TO_BACKEND_MODALITY: Record<string, string> = {
   head_ct: "ct_brain",
   ncct_brain: "ct_brain",
 };
+
+function normalizeResult(data: unknown): AnalysisResponse {
+  const r = data as AnalysisResponse;
+
+  if (Array.isArray(r.findings)) {
+    r.findings = r.findings.map((f) => ({
+      ...f,
+      confidence:
+        typeof f.confidence === "number" && f.confidence > 1
+          ? f.confidence / 100
+          : f.confidence,
+    }));
+  }
+
+  if (typeof r.confidence === "number" && r.confidence > 1) {
+    r.confidence = r.confidence / 100;
+  }
+
+  if (typeof r.heatmap_url === "string" && r.heatmap_url.startsWith("/")) {
+    r.heatmap_url = `${GATEWAY_URL}${r.heatmap_url}`;
+  }
+
+  if (Array.isArray(r.findings)) {
+    r.findings = r.findings.map((f) => ({
+      ...f,
+      heatmap_url:
+        typeof f.heatmap_url === "string" && f.heatmap_url.startsWith("/")
+          ? `${GATEWAY_URL}${f.heatmap_url}`
+          : f.heatmap_url,
+    }));
+  }
+
+  return r;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new AnalysisCancelledError());
+    const id = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(id);
+          reject(new AnalysisCancelledError());
+        },
+        { once: true }
+      );
+    }
+  });
+}
 
 async function readGatewayError(res: Response): Promise<string> {
   const ct = res.headers.get("content-type") ?? "";
@@ -56,7 +109,8 @@ export async function analyzeImage(
   modality: string = "auto",
   patientId?: string,
   clinicalNotes?: string,
-  patientContext?: Record<string, unknown>
+  patientContext?: Record<string, unknown>,
+  signal?: AbortSignal
 ): Promise<AnalysisResponse> {
   const form = new FormData();
   form.append("file", file);
@@ -76,6 +130,7 @@ export async function analyzeImage(
     method: "POST",
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
+    signal,
   });
 
   if (res.status === 401) {
@@ -88,35 +143,65 @@ export async function analyzeImage(
 
   const data = await res.json();
   if (data?.status === "queued" && data?.job_id) {
-    return pollJobUntilComplete(data.job_id);
+    return pollJobUntilComplete(data.job_id, signal);
   }
-  return data;
+
+  if (!data.status || data.status === "complete" || data.status === "triage") {
+    return normalizeResult(data);
+  }
+
+  throw new Error(
+    `Unexpected analysis status "${data.status}" for job ${data.job_id ?? "unknown"}`
+  );
 }
 
-async function pollJobUntilComplete(jobId: string): Promise<AnalysisResponse> {
-  const maxPolls = 60;
-  for (let i = 0; i < maxPolls; i++) {
-    const status = await getJobStatus(jobId);
+async function pollJobUntilComplete(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<AnalysisResponse> {
+  const MAX_POLLS = 60;
+  const POLL_INTERVAL_MS = 2000;
+
+  for (let i = 0; i < MAX_POLLS; i++) {
+    if (signal?.aborted) {
+      throw new AnalysisCancelledError();
+    }
+
+    const status = await getJobStatus(jobId, signal);
+
     if (status.status === "queued" || status.status === "processing") {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await sleep(POLL_INTERVAL_MS, signal);
       continue;
     }
-    if (status.status === "complete" && status.result) {
-      return status.result;
+
+    if (status.status === "complete") {
+      if (!status.result) {
+        throw new Error(`Job ${jobId} complete but result is missing.`);
+      }
+      return normalizeResult(status.result);
     }
+
     if (status.status === "failed") {
-      throw new Error(status.error ?? `Job ${jobId} failed`);
+      throw new Error(status.error ?? `Job ${jobId} failed with no error detail.`);
     }
-    throw new Error(`Unexpected status for job ${jobId}: ${status.status}`);
+
+    throw new Error(`Job ${jobId} returned unexpected status: "${status.status}"`);
   }
-  throw new Error("Analysis timed out");
+
+  throw new Error(
+    `Analysis timed out after ${(MAX_POLLS * POLL_INTERVAL_MS) / 1000}s.`
+  );
 }
 
 /** Poll async job status */
-export async function getJobStatus(jobId: string): Promise<JobStatus> {
+export async function getJobStatus(
+  jobId: string,
+  signal?: AbortSignal
+): Promise<JobStatus> {
   const token = getGatewayAuthToken();
   const res = await fetch(`${GATEWAY_URL}/job/${jobId}/status`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
+    signal,
   });
   if (res.status === 401) {
     throw new Error("Authentication required. Please log in.");
@@ -163,6 +248,7 @@ export async function generateReport(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ ...analysisResult, language }),
+    signal: AbortSignal.timeout(120000),
   });
   if (res.status === 401) {
     throw new Error("Authentication required. Please log in.");
@@ -194,6 +280,7 @@ export async function askCoPilot(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ question, context }),
+    signal: AbortSignal.timeout(120000),
   });
   if (!res.ok) throw new Error(`Co-pilot failed: ${res.status}`);
   const data = await res.json();
@@ -214,6 +301,7 @@ export async function requestUnifiedReport(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({ results: individualResults, patient_id: patientId, language }),
+    signal: AbortSignal.timeout(180000),
   });
   if (res.status === 401) {
     throw new Error("Authentication required. Please log in.");
@@ -240,6 +328,7 @@ export async function fetchPacsStudies(filters?: {
   date_to?: string;
   limit?: number;
 }): Promise<PacsStudy[]> {
+  const token = getGatewayAuthToken();
   const params = new URLSearchParams();
   if (filters?.patient_name) params.set("patient_name", filters.patient_name);
   if (filters?.patient_id) params.set("patient_id", filters.patient_id);
@@ -249,7 +338,10 @@ export async function fetchPacsStudies(filters?: {
   if (filters?.limit) params.set("limit", String(filters.limit));
 
   const url = `${PACS_BASE}/studies${params.toString() ? "?" + params : ""}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  const res = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    signal: AbortSignal.timeout(15000),
+  });
   if (!res.ok) return [];
   return res.json();
 }
@@ -257,7 +349,11 @@ export async function fetchPacsStudies(filters?: {
 /** Fetch worklist items */
 export async function fetchWorklist(): Promise<WorklistItem[]> {
   try {
-    const res = await fetch(`${PACS_BASE}/worklist`, { signal: AbortSignal.timeout(10000) });
+    const token = getGatewayAuthToken();
+    const res = await fetch(`${PACS_BASE}/worklist`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(10000),
+    });
     if (!res.ok) return [];
     return res.json();
   } catch {
@@ -267,10 +363,15 @@ export async function fetchWorklist(): Promise<WorklistItem[]> {
 
 /** Create worklist item */
 export async function createWorklistItem(item: Omit<WorklistItem, "id">): Promise<WorklistItem> {
+  const token = getGatewayAuthToken();
   const res = await fetch(`${PACS_BASE}/worklist`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify(item),
+    signal: AbortSignal.timeout(30000),
   });
   if (!res.ok) throw new Error("Failed to create worklist item");
   return res.json();
@@ -281,10 +382,15 @@ export async function sendStudyToAI(
   studyId: string,
   modalityOverride?: string
 ): Promise<{ status: string; job_id: string }> {
+  const token = getGatewayAuthToken();
   const res = await fetch(`${PACS_BASE}/send-to-ai`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify({ study_id: studyId, modality_override: modalityOverride }),
+    signal: AbortSignal.timeout(60000),
   });
   if (!res.ok) throw new Error("Failed to send study to AI");
   return res.json();
@@ -292,8 +398,10 @@ export async function sendStudyToAI(
 
 /** Test PACS connectivity (C-ECHO) */
 export async function echoPacs(modalityName: string): Promise<{ status: string }> {
+  const token = getGatewayAuthToken();
   const res = await fetch(`${PACS_BASE}/modalities/${modalityName}/echo`, {
     method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
     signal: AbortSignal.timeout(10000),
   });
   return res.json();
@@ -302,7 +410,11 @@ export async function echoPacs(modalityName: string): Promise<{ status: string }
 /** Get PACS config */
 export async function getPacsConfig(): Promise<PacsConfig | null> {
   try {
-    const res = await fetch(`${PACS_BASE}/config`, { signal: AbortSignal.timeout(5000) });
+    const token = getGatewayAuthToken();
+    const res = await fetch(`${PACS_BASE}/config`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(5000),
+    });
     if (!res.ok) return null;
     return res.json();
   } catch {

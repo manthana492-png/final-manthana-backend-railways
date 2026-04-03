@@ -6,7 +6,7 @@
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              FRONTEND (Local)                                │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Next.js 14 App (manthana-scan)                                     │   │
+│  │  Next.js 14 App (manthana-radio-frontend)                           │   │
 │  │  • Port: 3000 (dev) or 80/443 (production)                          │   │
 │  │  • API Target: http://<GPU_SERVER>:8000                           │   │
 │  │  • DICOM Viewer: CornerstoneJS                                      │   │
@@ -134,7 +134,7 @@ curl http://localhost:8000/health
 
 ```bash
 # 1. On local machine (Windows/Mac/Linux)
-cd manthana-scan
+cd manthana-radio-frontend
 
 # 2. Install dependencies (if not already)
 npm install
@@ -308,7 +308,7 @@ curl -H "Origin: http://localhost:3000" \
 sudo ufw allow 8000/tcp  # Ubuntu
 
 # 3. Verify URL in .env.local
-cat manthana-scan/.env.local
+cat manthana-radio-frontend/.env.local
 ```
 
 ### Issue: Lab report parsing fails

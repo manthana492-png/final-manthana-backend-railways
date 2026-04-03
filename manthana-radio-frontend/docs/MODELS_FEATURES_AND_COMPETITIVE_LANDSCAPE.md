@@ -1,6 +1,6 @@
 # Manthana Radiologist Copilot — Models, Features & Competitive Landscape
 
-**Document type:** Engineering / product reference derived from the **`manthana-scan` frontend codebase** (Next.js app + `lib/`).  
+**Document type:** Engineering / product reference derived from the **`manthana-radio-frontend`** codebase (Next.js app + `lib/`).  
 **Last reviewed:** Code snapshot as of repository state when this file was authored.
 
 **Important limitations**
