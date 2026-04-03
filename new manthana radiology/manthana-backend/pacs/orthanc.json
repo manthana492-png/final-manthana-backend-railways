@@ -1,0 +1,82 @@
+{
+    "Name": "Manthana PACS",
+    "DicomAet": "MANTHANA",
+    "DicomPort": 4242,
+    "HttpPort": 8042,
+    "RemoteAccessAllowed": true,
+    "AuthenticationEnabled": true,
+    "RegisteredUsers": {
+        "manthana": "manthana-pacs-secret"
+    },
+
+    "StorageDirectory": "/var/lib/orthanc/db",
+    "IndexDirectory": "/var/lib/orthanc/db",
+    "StorageCompression": true,
+    "MaximumStorageSize": 0,
+    "MaximumPatientCount": 0,
+
+    "ConcurrentJobs": 4,
+    "JobsHistorySize": 100,
+    "StableAge": 60,
+    "LimitFindResults": 256,
+    "LimitFindInstances": 256,
+
+    "HttpsCACertificates": "/etc/ssl/certs/ca-certificates.crt",
+    "HttpsVerifyPeers": true,
+
+    "DicomWeb": {
+        "Enable": true,
+        "Root": "/dicom-web/",
+        "EnableWado": true,
+        "WadoRoot": "/wado",
+        "Ssl": false,
+        "StudiesMetadata": "Full",
+        "SeriesMetadata": "Full"
+    },
+
+    "Worklists": {
+        "Enable": true,
+        "Database": "/var/lib/orthanc/worklists"
+    },
+
+    "PostgreSQL": {
+        "EnableIndex": true,
+        "EnableStorage": false,
+        "Host": "pacs_db",
+        "Port": 5432,
+        "Database": "orthanc",
+        "Username": "orthanc",
+        "Password": "manthana_pacs_2024",
+        "Lock": false
+    },
+
+    "DicomModalities": {
+    },
+
+    "OrthancPeers": {
+    },
+
+    "LuaScripts": [
+        "/etc/orthanc/lua/auto-route.lua"
+    ],
+
+    "UserMetadata": {
+        "ai-job-id": 1024,
+        "ai-status": 1025,
+        "analyzed-timestamp": 1026
+    },
+
+    "DicomAlwaysAllowEcho": true,
+    "DicomAlwaysAllowFind": true,
+    "DicomAlwaysAllowFindWorklist": true,
+    "DicomAlwaysAllowStore": true,
+    "DicomCheckCalledAet": false,
+    "UnknownSopClassAccepted": true,
+
+    "OverwriteInstances": true,
+    "KeepAlive": true,
+    "TcpNoDelay": true,
+    "HttpThreadsCount": 8,
+    "SaveJobs": true,
+    "MediaArchiveSize": 1
+}

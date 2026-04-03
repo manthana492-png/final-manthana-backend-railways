@@ -1,0 +1,20 @@
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+httpx==0.28.*
+openai>=1.0
+PyJWT==2.10.*
+python-multipart==0.0.*
+pydantic==2.*
+redis==5.*
+rq==2.*
+torch>=2.0
+torchvision>=0.15
+torchxrayvision>=1.2
+scikit-image>=0.22
+numpy>=1.24
+Pillow>=10.0
+
+# Case Embeddings (Parrotlet-e) + Vector Store
+transformers>=4.52.0
+chromadb>=0.5.0
+sentence-transformers>=2.7.0

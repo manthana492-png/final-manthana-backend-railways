@@ -1,0 +1,104 @@
+"""
+Manthana — CT Brain (NCCT) head CT service.
+"""
+import json
+import os
+import sys
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+
+_root = Path(__file__).resolve().parents[2]
+for _shared in (Path("/app/shared"), _root / "shared"):
+    if _shared.is_dir():
+        sys.path.insert(0, str(_shared))
+        break
+
+from config import PORT, SERVICE_NAME
+
+app = FastAPI(title=f"Manthana — {SERVICE_NAME}")
+
+
+@app.get("/health")
+async def health():
+    import torch
+
+    from inference import is_loaded
+
+    ch = is_loaded()
+    ready_inf = bool(ch.get("ci_dummy_enabled") or ch.get("torchscript_file_present"))
+    return {
+        "service": SERVICE_NAME,
+        "status": "ok" if ready_inf else "degraded",
+        "component_health": ch,
+        "gpu_available": torch.cuda.is_available(),
+    }
+
+
+@app.get("/ready")
+async def ready():
+    from fastapi import HTTPException
+
+    from inference import is_loaded
+
+    ch = is_loaded()
+    if ch.get("ci_dummy_enabled"):
+        return {"ready": True, **ch}
+    if ch.get("torchscript_configured") and ch.get("torchscript_file_present"):
+        return {"ready": True, **ch}
+    raise HTTPException(
+        status_code=503,
+        detail="CT Brain service not ready: set CT_BRAIN_TORCHSCRIPT_PATH or CT_BRAIN_CI_DUMMY_MODEL=1 for tests.",
+    )
+
+
+@app.post("/analyze/ct_brain")
+async def analyze(
+    file: UploadFile = File(...),
+    job_id: str = Form(None),
+    patient_id: str = Form(""),
+    series_dir: str = Form(""),
+    source_modality: str = Form(""),
+    patient_context_json: str = Form(""),
+):
+    from inference import run_pipeline
+    from schemas import AnalysisResponse
+
+    if not job_id:
+        job_id = str(uuid.uuid4())
+    start = time.time()
+    upload_dir = "/tmp/manthana_uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+    ext = os.path.splitext(file.filename or "")[1] or ".dcm"
+    fp = os.path.join(upload_dir, f"{job_id}{ext}")
+    with open(fp, "wb") as f:
+        f.write(await file.read())
+    patient_ctx: dict = {}
+    if patient_context_json and patient_context_json.strip():
+        try:
+            parsed = json.loads(patient_context_json)
+            if isinstance(parsed, dict):
+                patient_ctx = parsed
+        except json.JSONDecodeError:
+            patient_ctx = {}
+    try:
+        result = run_pipeline(
+            fp,
+            job_id,
+            series_dir=series_dir or "",
+            source_modality=source_modality or "",
+            patient_context=patient_ctx or None,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    result["processing_time_sec"] = round(time.time() - start, 2)
+    result["job_id"] = job_id
+    return AnalysisResponse(**result).model_dump()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

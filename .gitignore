@@ -1,0 +1,6 @@
+# Workspace root — do not commit secrets or studio home files
+/api-keys.env
+/mkeys.py
+/.bash_history
+/.zsh_history
+/.gitconfig

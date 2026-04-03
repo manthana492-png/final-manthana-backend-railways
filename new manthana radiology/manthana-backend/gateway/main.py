@@ -1,0 +1,886 @@
+import sys, os
+import sys as _sys
+_GATEWAY_DIR  = os.path.dirname(os.path.abspath(__file__))
+_BACKEND_ROOT = os.path.dirname(_GATEWAY_DIR)
+sys.path.insert(0, _BACKEND_ROOT)
+sys.path.insert(0, os.path.join(_BACKEND_ROOT, "shared"))
+sys.path.insert(0, _GATEWAY_DIR)
+
+"""
+Manthana — API Gateway
+Central entry point. Routes requests by modality → individual services.
+Handles JWT authentication and file upload.
+"""
+
+import uuid
+import time
+import shutil
+import httpx
+import logging
+from pathlib import Path
+from typing import Optional, Union
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
+from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi.staticfiles import StaticFiles
+
+from admin import admin_router
+from consent import router as consent_router
+from auth_routes import router as auth_router
+from auth import verify_token, JWT_SECRET
+from router import ALIASES, route_to_service
+from ct_routing import enrich_ct_gateway_response
+from mri_routing import enrich_mri_gateway_response
+from schemas import (
+    GatewayResponse,
+    SingleReportRequest,
+    UnifiedReportRequest,
+    UnifiedReportResponse,
+    CopilotRequest,
+    CopilotResponse,
+)
+from triage import run_triage
+
+
+def _gateway_cors_allow_origins() -> list[str]:
+    """Production: set GATEWAY_CORS_ORIGINS=comma-separated URLs. Empty = legacy allow-all (dev only)."""
+    raw = os.getenv("GATEWAY_CORS_ORIGINS", "").strip()
+    if not raw:
+        return ["*"]
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+# ════════════════════════════════════════════════════════════
+# MODEL NAME OBFUSCATION — V5
+# No real model names leave the backend. Frontend sees only
+# Manthana-branded engine names. Reverse engineering reveals
+# nothing about underlying models.
+# ════════════════════════════════════════════════════════════
+MODEL_DISPLAY_NAMES = {
+    # CXR
+    "MedRAX-2": "Manthana CXR Engine",
+    "EVA-X": "Manthana CXR Engine v2",
+    "CheXagent-8b": "Manthana Report AI",
+    "TorchXRayVision-DenseNet121-triage": "Manthana Quick Screen",
+    "TorchXRayVision-DenseNet121-all": "Manthana CXR Engine",
+    "TorchXRayVision-DenseNet121-chex": "Manthana CXR Engine v2",
+    "TorchXRayVision-DenseNet121-mimic_nb": "Manthana CXR Engine v2",
+    # ECG
+    "ecg-fm": "Manthana ECG Engine",
+    "HeartLang": "Manthana ECG Language AI",
+    "Manthana-ECG-Engine": "Manthana ECG Engine",
+    "ecg-digitiser": "Manthana ECG Digitizer",
+    "ecg-signal-extractor": "Manthana ECG Engine",
+    # Brain/Neuro
+    "Prima": "Manthana Neuro Engine",
+    # Segmentation
+    "TotalSegmentator-v2": "Manthana Segment Engine",
+    "TotalSegmentator-MRI": "Manthana Segment Engine",
+    "TotalSegmentator": "Manthana Segment Engine",
+    "TotalSegmentator-heartchambers": "Manthana Segment Engine",
+    "TotalSegmentator-vertebrae": "Manthana Segment Engine",
+    "SynthSeg": "Manthana Neuro Engine",
+    # Pathology / cytology
+    "Virchow": "Manthana Pathology Engine",
+    "Virchow2": "Manthana Pathology Engine",
+    "Virchow (Apache 2.0)": "Manthana Pathology Engine",
+    "DSMIL-MIL": "Manthana Slide Intelligence",
+    # CT / cardiac
+    "RadGPT": "Manthana CT Intelligence",
+    "TotalSegmentator-AAQ-proxy": "Manthana Vascular Analysis Engine",
+    "Comp2Comp AAQ (FDA K243779)": "Manthana Vascular Analysis (FDA-ref K243779)",
+    "Comp2Comp BMD (FDA K242295)": "Manthana Bone Density (FDA-ref K242295)",
+    "Comp2Comp-spine": "Manthana Spine Density Engine",
+    "Comp2Comp-liver_spleen_pancreas": "Manthana Abdominal Organ Engine",
+    "Comp2Comp-spine_muscle_adipose_tissue": "Manthana Body Composition Engine",
+    "nnUNet": "Manthana Cardiac Engine",
+    "MedSAM2": "Manthana Assist Engine",
+    # Oral
+    "EfficientNet-B3": "Manthana Oral Screening Engine",
+    # Dermatology
+    "EfficientNet-B4-derm": "Manthana Derm Engine",
+    "claude-vision-derm": "Manthana Derm Engine",
+    "claude-sonnet-4-20250514": "Manthana Intelligence Core",
+    # Ultrasound / mammo
+    "XZheng0427/OpenUS": "Manthana Ultrasound Engine",
+    "OpenUS": "Manthana Ultrasound Engine",
+    "openus": "Manthana Ultrasound Engine",
+    "EchoCare": "Manthana Ultrasound Engine v2",
+    "Mirai": "Manthana Mammography Engine",
+    "Mirai (MIT)": "Manthana Mammography Engine",
+    "DigitalEye": "Manthana Imaging Engine",
+    # Report LLMs (unified / assembly)
+    "DeepSeek-V3": "Manthana Report AI",
+    "DeepSeek": "Manthana Report AI",
+    "deepseek-v3": "Manthana Report AI",
+    "gemini-1.5-flash": "Manthana Report AI",
+    "gemini-2.0-flash-lite": "Manthana Report AI",
+    "gemini-2.0-flash": "Manthana Report AI",
+    "groq-llama-3.3-70b": "Manthana Report AI",
+    "groq:llama-3.3-70b-versatile": "Manthana Report AI",
+    "groq-llama-3.3-70b-versatile": "Manthana Report AI",
+    "groq-llama-3.1-8b-instant": "Manthana Report AI",
+    "qwen-2.5-max": "Manthana Report AI",
+    "none": "Manthana Report AI",
+    "fallback-en": "Manthana Report AI",
+    # Triage
+    "triage-heuristic": "Manthana Quick Screen",
+    # CT Brain (NCCT)
+    "CT-Brain-TorchScript": "Manthana Neuro CT Engine",
+    "CT-Brain-CI-Dummy": "Manthana Neuro CT Engine",
+    "CT-Brain-NoWeights": "Manthana Neuro CT Engine",
+    "CT-Brain-TorchScript-MissingOrFailed": "Manthana Neuro CT Engine",
+    "Kimi-narrative-CT-Brain": "Manthana Report AI",
+    "Anthropic-narrative-CT-Brain": "Manthana Report AI",
+    "Kimi-narrative-MRI": "Manthana Report AI",
+    "Anthropic-narrative-MRI": "Manthana Report AI",
+    # Generic fallback
+    "Demo-Model": "Manthana AI Engine",
+}
+
+
+def _obfuscate_model_names(models: list | None) -> list:
+    """Replace real model names with Manthana-branded names."""
+    if not models:
+        return []
+    out: list[str] = []
+    for m in models:
+        if not isinstance(m, str):
+            out.append("Manthana AI Engine")
+            continue
+        if m.startswith("triage-pass-through-"):
+            out.append("Manthana Quick Screen")
+            continue
+        out.append(MODEL_DISPLAY_NAMES.get(m, "Manthana AI Engine"))
+    return list(dict.fromkeys(out))
+
+
+def _canonical_modality(modality: str) -> str:
+    m = modality.lower().strip()
+    return ALIASES.get(m, m)
+
+
+def _build_findings_dict_for_assemble(req: SingleReportRequest) -> dict:
+    """Map SingleReportRequest → one dict for report_assembly `findings` field."""
+    if isinstance(req.findings, dict):
+        d = dict(req.findings)
+    else:
+        d = {"items": list(req.findings or [])}
+    if "pathology_scores" not in d:
+        d["pathology_scores"] = req.pathology_scores or {}
+    if "impression" not in d:
+        d["impression"] = req.impression
+    cn = req.clinical_notes
+    if cn is None and isinstance(req.structures, dict):
+        cn = req.structures.get("clinical_notes")
+    d["clinical_notes"] = (cn if cn is not None else "") or d.get("clinical_notes", "")
+    return d
+
+
+def _structures_to_list(structures: Union[list, dict]) -> list:
+    if isinstance(structures, dict):
+        return [structures]
+    return list(structures or [])
+
+app = FastAPI(
+    title="Manthana Radiology Suite — Gateway",
+    description="India's Complete AI Radiology Second-Opinion Suite",
+    version="1.0.0",
+)
+
+app.include_router(admin_router)
+app.include_router(consent_router)
+app.include_router(auth_router)
+
+# CORS — set GATEWAY_CORS_ORIGINS in production (comma-separated)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_gateway_cors_allow_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    incoming = (request.headers.get("X-Request-ID") or request.headers.get("X-Correlation-ID") or "").strip()
+    rid = incoming or str(uuid.uuid4())
+    request.state.request_id = rid
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+
+_JWT_SECRET_DEFAULT = "change-this-to-a-random-secret-minimum-32-chars"
+
+
+@app.on_event("startup")
+async def _validate_secrets():
+    import os as _os
+
+    secret = _os.getenv("JWT_SECRET", _JWT_SECRET_DEFAULT)
+    if secret == _JWT_SECRET_DEFAULT or len(secret) < 32:
+        print(
+            "FATAL: JWT_SECRET is not set or is still the default placeholder. "
+            "Set a random secret of at least 32 characters in your .env before "
+            "running in production.",
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/manthana_uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# ── Heatmap static file serving ──
+HEATMAP_DIR = os.path.join(UPLOAD_DIR, "heatmaps")
+os.makedirs(HEATMAP_DIR, exist_ok=True)
+app.mount("/heatmaps", StaticFiles(directory=HEATMAP_DIR), name="heatmaps")
+
+# ── PDF report static file serving ──
+PDF_OUTPUT_DIR = os.getenv("PDF_OUTPUT_DIR", "/tmp/manthana_reports")
+os.makedirs(PDF_OUTPUT_DIR, exist_ok=True)
+app.mount("/reports", StaticFiles(directory=PDF_OUTPUT_DIR), name="reports")
+
+
+@app.get("/health")
+async def health():
+    return {
+        "service": "gateway",
+        "status": "ok",
+        "version": "1.0.0",
+    }
+
+
+@app.post("/analyze", response_model=GatewayResponse)
+async def analyze(
+    request: Request,
+    modality: str = Form(..., description="Service type: xray, ecg, oral_cancer, etc."),
+    file: UploadFile = File(..., description="Medical image/file to analyze"),
+    patient_id: str = Form(None, description="Optional patient identifier"),
+    series_dir: Optional[str] = Form(
+        None,
+        description="Optional path to DICOM series directory on shared volume (PACS)",
+    ),
+    clinical_notes: Optional[str] = Form(
+        None,
+        description="Optional clinical context (e.g. tobacco use) forwarded to analysis services",
+    ),
+    source_modality: Optional[str] = Form(
+        None,
+        description="Optional DICOM Modality hint (e.g. MR) for CT services when PACS routes MR to CT pipeline",
+    ),
+    patient_context_json: Optional[str] = Form(
+        None,
+        description="Optional JSON object with patient context (e.g. dermatology age/sex/location)",
+    ),
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Main analysis endpoint.
+    
+    1. Validates JWT token
+    2. Saves uploaded file
+    3. Routes to correct service by modality
+    4. Returns job ID for async polling OR direct result
+    """
+    job_id = str(uuid.uuid4())
+    start_time = time.time()
+
+    # Save uploaded file
+    file_ext = Path(file.filename).suffix if file.filename else ""
+    saved_path = os.path.join(UPLOAD_DIR, f"{job_id}{file_ext}")
+    
+    with open(saved_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    canon = _canonical_modality(modality)
+
+    # MSK MRI — no downstream Docker service (v1)
+    if canon == "unsupported_mr_msk":
+        import sys as _sys
+
+        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+        from disclaimer import DISCLAIMER as _DISC
+
+        return {
+            "job_id": job_id,
+            "status": "complete",
+            "modality": modality,
+            "analysis_depth": "deep",
+            "findings": [
+                {
+                    "label": "MSK MRI — Not Yet Supported",
+                    "description": (
+                        "Musculoskeletal MRI analysis is not available in this version. "
+                        "Please refer to a musculoskeletal radiologist."
+                    ),
+                    "severity": "info",
+                    "confidence": 100.0,
+                }
+            ],
+            "impression": "MSK MRI analysis unavailable in current version.",
+            "pathology_scores": {},
+            "structures": [],
+            "confidence": "medium",
+            "heatmap_url": None,
+            "processing_time_sec": round(time.time() - start_time, 2),
+            "models_used": [],
+            "disclaimer": _DISC,
+        }
+
+    # Deterministic xray policy: always deep or threshold triage.
+    xray_triage_policy = os.getenv("XRAY_TRIAGE_POLICY", "always_deep").strip().lower()
+    # Backward-compat env: SKIP_XRAY_TRIAGE=1 forces always_deep.
+    if os.getenv("SKIP_XRAY_TRIAGE", "").lower() in ("1", "true", "yes"):
+        xray_triage_policy = "always_deep"
+    if (
+        canon == "xray"
+        and xray_triage_policy == "always_deep"
+    ):
+        triage_result = {
+            "needs_deep": True,
+            "findings": [],
+            "triage_scores": {},
+            "triage_time_ms": 0,
+            "models_used": ["triage-policy-always-deep"],
+        }
+    else:
+        triage_result = run_triage(saved_path, canon)
+    if not triage_result["needs_deep"]:
+        return {
+            "job_id": job_id,
+            "status": "complete",
+            "modality": modality,
+            "analysis_depth": "triage",
+            "findings": triage_result["findings"],
+            "impression": "No significant abnormality detected on initial screening.",
+            "pathology_scores": triage_result.get("triage_scores") or {},
+            "structures": [],
+            "confidence": "medium",
+            "heatmap_url": None,
+            "processing_time_sec": round(triage_result["triage_time_ms"] / 1000.0, 2),
+            "models_used": _obfuscate_model_names(triage_result["models_used"]),
+            "disclaimer": "AI screening triage only — clinical correlation required.",
+        }
+
+    # Route to correct service
+    try:
+        service_url = route_to_service(modality)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Forward to service
+    rid = getattr(request.state, "request_id", None) or str(uuid.uuid4())
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            with open(saved_path, "rb") as f:
+                response = await client.post(
+                    service_url,
+                    files={"file": (file.filename, f, file.content_type)},
+                    data={
+                        "job_id": job_id,
+                        "patient_id": patient_id or "",
+                        "series_dir": series_dir or "",
+                        "clinical_notes": clinical_notes or "",
+                        "source_modality": source_modality or "",
+                        "patient_context_json": patient_context_json or "",
+                    },
+                    headers={"X-Request-ID": rid},
+                )
+
+        if response.status_code == 200:
+            result = response.json()
+            result["job_id"] = job_id
+            result["processing_time_sec"] = round(time.time() - start_time, 2)
+            result["analysis_depth"] = "deep"
+            result["models_used"] = _obfuscate_model_names(result.get("models_used"))
+            enrich_ct_gateway_response(
+                result,
+                request_modality=modality,
+                patient_context_json=patient_context_json,
+            )
+            enrich_mri_gateway_response(result, request_modality=modality)
+
+            # Auto-generate case embedding (async fire-and-forget)
+            _trigger_case_embedding(job_id, patient_id, modality, result)
+            
+            return result
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Service error: {response.text}",
+            )
+
+    except httpx.TimeoutException:
+        return GatewayResponse(
+            job_id=job_id,
+            status="queued",
+            message=f"Analysis queued. Poll GET /job/{job_id}/status",
+        ).model_dump()
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service '{modality}' is not available. Check if it's running.",
+        )
+
+
+@app.get("/job/{job_id}/status")
+async def job_status(job_id: str, token_data: dict = Depends(verify_token)):
+    """Poll job status for async analysis."""
+    # In production, this checks Redis queue
+    import sys
+    sys.path.insert(0, "/app/shared")
+    from queue_client import get_job_status
+    
+    status = get_job_status(job_id)
+    return status
+
+
+@app.get("/services")
+async def list_services():
+    """List all available analysis services and their status."""
+    from router import SERVICE_MAP
+    
+    services = []
+    for modality, url in SERVICE_MAP.items():
+        # Quick health check
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                health_url = url.rsplit("/analyze", 1)[0] + "/health"
+                resp = await client.get(health_url)
+                status = "online" if resp.status_code == 200 else "offline"
+        except Exception:
+            status = "offline"
+        
+        services.append({
+            "modality": modality,
+            "status": status,
+            "endpoint": f"POST /analyze (modality={modality})",
+        })
+    
+    return {"services": services}
+
+
+@app.get("/health/services")
+async def health_services():
+    """Alias for frontend clients that call /health/services."""
+    return await list_services()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Case Embeddings API (Parrotlet-e Integration)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@app.post("/cases/{case_id}/embed")
+async def embed_case(
+    case_id: str,
+    patient_id: Optional[str] = None,
+    modality: Optional[str] = None,
+    findings: Optional[list] = None,
+    impression: Optional[str] = None,
+    pathology_scores: Optional[dict] = None,
+    structures: Optional[list] = None,
+    lab_values: Optional[dict] = None,
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Generate and store embedding for a completed case.
+    Called after analysis completes to enable similarity search.
+    """
+    import sys
+    sys.path.insert(0, "/app/shared")
+    
+    try:
+        from case_embeddings import build_case_summary, store_case_embedding
+        
+        # Build canonical summary
+        case_summary = build_case_summary(
+            modality=modality or "unknown",
+            findings=findings or [],
+            impression=impression or "",
+            pathology_scores=pathology_scores or {},
+            structures=structures or [],
+            lab_values=lab_values,
+        )
+        
+        # Store embedding
+        record = store_case_embedding(
+            case_id=case_id,
+            case_summary=case_summary,
+            patient_id=patient_id,
+            modality=modality,
+            metadata={
+                "pathology_scores": pathology_scores,
+                "structures": structures,
+                "findings_count": len(findings) if findings else 0,
+            },
+        )
+        
+        return {
+            "case_id": case_id,
+            "status": "embedded",
+            "embedding_dim": record["embedding_dim"],
+            "model": record["model"],
+            "created_at": record["created_at"],
+        }
+        
+    except Exception as e:
+        logger = logging.getLogger("manthana.gateway")
+        logger.error(f"Embedding generation failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Embedding generation failed: {str(e)}",
+        )
+
+
+@app.get("/cases/similar")
+async def find_similar_cases(
+    case_id: Optional[str] = None,
+    query_text: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    top_k: int = 5,
+    modality_filter: Optional[str] = None,
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Find similar cases by case_id, text query, or patient history.
+    
+    - case_id: Find cases similar to this completed case
+    - query_text: Semantic search by description (e.g., "pneumonia with pleural effusion")
+    - patient_id: Get similar cases for this patient's history
+    """
+    import sys
+    sys.path.insert(0, "/app/shared")
+    
+    try:
+        from case_embeddings import find_similar_cases as _find_similar
+        
+        # Build embedding from text if provided
+        query_embedding = None
+        if query_text and not case_id:
+            from case_embeddings import generate_case_embedding
+            temp = generate_case_embedding(
+                case_summary=query_text,
+                case_id="temp_query",
+            )
+            query_embedding = temp["embedding"]
+        
+        results = _find_similar(
+            case_id=case_id,
+            query_embedding=query_embedding,
+            top_k=top_k,
+            modality_filter=modality_filter,
+        )
+        
+        # Filter by patient if requested (don't expose cross-patient data)
+        if patient_id:
+            import hashlib
+            patient_hash = hashlib.sha256(patient_id.encode()).hexdigest()[:16]
+            results = [r for r in results if r.get("patient_hash") == patient_hash]
+        
+        return {
+            "query_case_id": case_id,
+            "query_text": query_text[:100] if query_text else None,
+            "results_count": len(results),
+            "results": results,
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Similarity search failed: {str(e)}",
+        )
+
+
+@app.post("/report")
+async def single_report(
+    request: SingleReportRequest,
+    token_data: dict = Depends(verify_token),
+):
+    """Single-modality narrative report — proxies to report_assembly /assemble_report."""
+    start_time = time.time()
+    findings_dict = _build_findings_dict_for_assemble(request)
+    payload = {
+        "job_id": request.job_id or str(uuid.uuid4()),
+        "modality": request.modality,
+        "findings": findings_dict,
+        "structures": _structures_to_list(request.structures),
+        "patient_id": request.patient_id,
+        "detected_region": request.detected_region,
+        "language": request.language,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                "http://report_assembly:8020/assemble_report",
+                json=payload,
+            )
+        if response.status_code == 200:
+            result = response.json()
+            result["processing_time_sec"] = round(time.time() - start_time, 2)
+            result["models_used"] = _obfuscate_model_names(result.get("models_used"))
+            return result
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Report service error: {response.text}",
+        )
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="Report assembly service is not available. Check if it's running.",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Report generation timed out. Please try again.",
+        )
+
+
+@app.post("/copilot", response_model=CopilotResponse)
+async def copilot(
+    request: CopilotRequest,
+    token_data: dict = Depends(verify_token),
+):
+    import os, json
+    from openai import OpenAI
+
+    modality = request.context.get("modality", "unknown")
+    findings = request.context.get("findings", [])
+    impression = request.context.get("impression", "")
+    pathology_scores = request.context.get("pathology_scores", {})
+
+    system_prompt = f"""You are a senior radiologist AI assistant for Indian 
+clinical practice. A radiologist is asking a follow-up question about an 
+AI-generated analysis report.
+
+Modality: {modality}
+Current impression: {impression}
+Key findings: {json.dumps(findings, indent=2)[:3000]}
+Pathology scores: {json.dumps(pathology_scores, indent=2)[:2000]}
+
+Answer the clinician's question concisely and accurately. Use Indian 
+epidemiological context where relevant (TB, NCC, NAFLD, etc.). 
+If the question is outside radiology scope, say so clearly.
+End with: "Clinical correlation and radiologist verification required."
+"""
+
+    # Kimi primary
+    kimi_key = os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY", "")
+    kimi_base = os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1")
+    kimi_model = os.getenv("KIMI_MODEL", "kimi-k2.5")
+
+    if kimi_key:
+        try:
+            client = OpenAI(api_key=kimi_key, base_url=kimi_base)
+            resp = client.chat.completions.create(
+                model=kimi_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": request.question},
+                ],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+            content = resp.choices[0].message.content or ""
+            return CopilotResponse(
+                response=content.strip(),
+                model_used=_obfuscate_model_names([kimi_model])[0],
+            )
+        except Exception:
+            # Fall through to Groq
+            pass
+
+    # Groq fallback
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    groq_base = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    if groq_key:
+        try:
+            client = OpenAI(api_key=groq_key, base_url=groq_base)
+            resp = client.chat.completions.create(
+                model=groq_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": request.question},
+                ],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+            content = resp.choices[0].message.content or ""
+            return CopilotResponse(
+                response=content.strip(),
+                model_used=_obfuscate_model_names([groq_model])[0],
+            )
+        except Exception:
+            pass
+
+    raise HTTPException(
+        status_code=503,
+        detail="CoPilot service temporarily unavailable. No LLM keys configured.",
+    )
+
+
+@app.post("/unified-report", response_model=UnifiedReportResponse)
+async def unified_report(
+    request: UnifiedReportRequest,
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Multi-model unified analysis endpoint.
+    
+    Accepts individual analysis results from multiple modalities,
+    forwards them to the report_assembly service for cross-modality
+    unified report generation using DeepSeek.
+    """
+    start_time = time.time()
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                "http://report_assembly:8020/assemble_unified_report",
+                json=request.model_dump(),
+            )
+
+        if response.status_code == 200:
+            result = response.json()
+            result["processing_time_sec"] = round(time.time() - start_time, 2)
+            result["models_used"] = _obfuscate_model_names(result.get("models_used"))
+            return result
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Unified report service error: {response.text}",
+            )
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="Report assembly service is not available. Check if it's running.",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Unified report generation timed out. Please try again.",
+        )
+
+
+# ════════════════════════════════════════════════════════
+# PACS REVERSE PROXY
+# Forwards all /pacs/* requests to the pacs_bridge service.
+# Frontend calls: gateway:8000/pacs/studies → pacs_bridge:8030/pacs/studies
+# ════════════════════════════════════════════════════════
+
+PACS_BRIDGE_URL = os.getenv("PACS_BRIDGE_URL", "http://pacs_bridge:8030")
+
+
+@app.api_route("/pacs/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def pacs_proxy(
+    path: str,
+    request: Request,
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Transparent reverse proxy for all PACS operations.
+
+    Forwards the full request (method, headers, query params, body)
+    to the pacs_bridge service, which hosts all /pacs/* endpoints:
+      /pacs/studies, /pacs/worklist, /pacs/send-to-ai,
+      /pacs/modalities/{name}/echo, /pacs/config, etc.
+    """
+    target_url = f"{PACS_BRIDGE_URL}/pacs/{path}"
+
+    # Preserve query string
+    if request.url.query:
+        target_url += f"?{request.url.query}"
+
+    # Read raw body (for POST/PUT)
+    body = await request.body()
+
+    # Forward headers (skip hop-by-hop headers)
+    forward_headers = {}
+    skip_headers = {"host", "content-length", "transfer-encoding", "connection"}
+    for key, value in request.headers.items():
+        if key.lower() not in skip_headers:
+            forward_headers[key] = value
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                content=body if body else None,
+            )
+
+        # Return the pacs_bridge response as-is
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.headers.get("content-type"),
+        )
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="PACS Bridge service is not available. Check if pacs_bridge is running.",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="PACS request timed out. The Orthanc server may be slow or unreachable.",
+        )
+
+
+def _trigger_case_embedding(job_id: str, patient_id: str, modality: str, result: dict):
+    """
+    Fire-and-forget case embedding generation.
+    Runs in background thread to not block response.
+    """
+    import threading
+    
+    def _embed():
+        try:
+            import sys
+            sys.path.insert(0, "/app/shared")
+            from case_embeddings import build_case_summary, store_case_embedding
+            
+            case_summary = build_case_summary(
+                modality=modality,
+                findings=result.get("findings", []),
+                impression=result.get("impression", ""),
+                pathology_scores=result.get("pathology_scores", {}),
+                structures=result.get("structures", []),
+                lab_values=result.get("labs"),
+            )
+            
+            store_case_embedding(
+                case_id=job_id,
+                case_summary=case_summary,
+                patient_id=patient_id,
+                modality=modality,
+                metadata={
+                    "pathology_scores": result.get("pathology_scores"),
+                    "structures": result.get("structures"),
+                    "models_used": result.get("models_used", []),
+                },
+            )
+            
+            logging.getLogger("manthana.gateway").info(f"Embedding created for case: {job_id}")
+            
+        except Exception as e:
+            logging.getLogger("manthana.gateway").error(f"Background embedding failed: {e}")
+    
+    # Run in background thread
+    thread = threading.Thread(target=_embed, daemon=True)
+    thread.start()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("GATEWAY_PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

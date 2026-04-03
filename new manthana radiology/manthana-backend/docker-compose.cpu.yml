@@ -1,0 +1,294 @@
+# ══════════════════════════════════════════════════════════
+# MANTHANA RADIOLOGY SUITE — Docker Compose (CPU-only)
+# For development/testing without GPU
+# ══════════════════════════════════════════════════════════
+
+version: "3.9"
+
+volumes:
+  model_cache:
+  redis_data:
+  upload_data:
+  orthanc_data:
+  pacs_db_data:
+
+networks:
+  manthana:
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+    networks: [manthana]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── PACS (Orthanc DICOM Server) ──
+  orthanc:
+    image: orthancteam/orthanc:24.12.2
+    ports:
+      - "${PORT_ORTHANC_HTTP:-8042}:8042"
+      - "${PORT_ORTHANC_DICOM:-4242}:4242"
+    volumes:
+      - orthanc_data:/var/lib/orthanc/db
+      - ./pacs/orthanc.json:/etc/orthanc/orthanc.json:ro
+      - ./pacs/lua:/etc/orthanc/lua:ro
+    environment:
+      ORTHANC_JSON: /etc/orthanc/orthanc.json
+    depends_on:
+      pacs_db: { condition: service_healthy }
+    networks: [manthana]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8042/system"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── PACS Database (PostgreSQL for Orthanc index) ──
+  pacs_db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orthanc
+      POSTGRES_USER: orthanc
+      POSTGRES_PASSWORD: ${ORTHANC_DB_PASSWORD:-manthana_pacs_2024}
+    volumes: [pacs_db_data:/var/lib/postgresql/data]
+    networks: [manthana]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orthanc"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── PACS Bridge (Gateway ↔ Orthanc DICOMweb proxy) ──
+  pacs_bridge:
+    build: ./services/pacs_bridge
+    ports: ["${PORT_PACS_BRIDGE:-8030}:8030"]
+    env_file: .env
+    volumes:
+      - upload_data:/tmp/manthana_uploads
+      - ./shared:/app/shared
+    depends_on:
+      orthanc: { condition: service_healthy }
+    networks: [manthana]
+    restart: unless-stopped
+
+  gateway:
+    build: ./gateway
+    ports: ["${GATEWAY_PORT:-8000}:8000"]
+    env_file: .env
+    environment:
+      - DEVICE=cpu
+      - XRAY_TRIAGE_POLICY=${XRAY_TRIAGE_POLICY:-always_deep}
+      - TRIAGE_ABNORMALITY_THRESHOLD=${TRIAGE_ABNORMALITY_THRESHOLD:-0.30}
+      - XRAY_MODEL_IDLE_UNLOAD_SEC=${XRAY_MODEL_IDLE_UNLOAD_SEC:-180}
+      - XRAY_UNLOAD_MODE=${XRAY_UNLOAD_MODE:-gpu_only}
+      - XRAY_MODEL_IDLE_CHECK_SEC=${XRAY_MODEL_IDLE_CHECK_SEC:-15}
+    volumes: [upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    depends_on: {redis: {condition: service_healthy}}
+    networks: [manthana]
+    restart: unless-stopped
+
+  report_assembly:
+    build: ./services/report_assembly
+    ports: ["${PORT_REPORT:-8020}:8020"]
+    env_file: .env
+    networks: [manthana]
+    restart: unless-stopped
+
+  queue_api:
+    build: ./services/queue
+    ports: ["${PORT_QUEUE_API:-8021}:8021"]
+    env_file: .env
+    volumes: [./shared:/app/shared]
+    depends_on: {redis: {condition: service_healthy}}
+    networks: [manthana]
+    restart: unless-stopped
+
+  queue_worker:
+    build: ./services/queue
+    command: python worker.py
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    depends_on: {redis: {condition: service_healthy}}
+    networks: [manthana]
+    restart: unless-stopped
+
+  # ── ALL SERVICES RUN ON CPU (slower but works without GPU) ──
+
+  body_xray:
+    build: ./services/01_body_xray
+    ports: ["${PORT_BODY_XRAY:-8001}:8001"]
+    env_file: .env
+    environment:
+      - DEVICE=cpu
+      - XRAY_REQUIRE_KIMI_NARRATIVE=${XRAY_REQUIRE_KIMI_NARRATIVE:-1}
+      - KIMI_MODEL=${KIMI_MODEL:-kimi-k2.5}
+      - XRAY_MODEL_IDLE_UNLOAD_SEC=${XRAY_MODEL_IDLE_UNLOAD_SEC:-180}
+      - XRAY_UNLOAD_MODE=${XRAY_UNLOAD_MODE:-gpu_only}
+      - XRAY_MODEL_IDLE_CHECK_SEC=${XRAY_MODEL_IDLE_CHECK_SEC:-15}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  brain_mri:
+    build: ./services/02_brain_mri
+    ports: ["${PORT_BRAIN_MRI:-8002}:8002"]
+    env_file: .env
+    environment:
+      - DEVICE=cpu
+      - MRI_NARRATIVE_POLICY=${MRI_NARRATIVE_POLICY:-kimi_then_anthropic}
+      - MRI_NARRATIVE_VISION=${MRI_NARRATIVE_VISION:-1}
+      - MAX_UPLOAD_MB_BRAIN_MRI=${MAX_UPLOAD_MB_BRAIN_MRI:-512}
+      # Shared TotalSeg idle: CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC / CT_TOTALSEG_IDLE_CHECK_SEC
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  cardiac_ct:
+    build: ./services/04_cardiac_ct
+    ports: ["${PORT_CARDIAC_CT:-8004}:8004"]
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  pathology:
+    build: ./services/05_pathology
+    ports: ["${PORT_PATHOLOGY:-8005}:8005"]
+    env_file: .env
+    environment:
+      - DEVICE=cpu
+      - CLAUDE_PATHOLOGY_MODEL=${CLAUDE_PATHOLOGY_MODEL:-claude-sonnet-4-20250514}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  abdominal_ct:
+    build: ./services/08_abdominal_ct
+    ports: ["${PORT_ABDOMINAL_CT:-8008}:8008"]
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  ct_brain:
+    build: ./services/11_ct_brain
+    ports: ["${PORT_CT_BRAIN:-8017}:8017"]
+    env_file: .env
+    environment:
+      - CT_BRAIN_NARRATIVE_POLICY=${CT_BRAIN_NARRATIVE_POLICY:-kimi_then_anthropic}
+      - CT_BRAIN_TORCHSCRIPT_PATH=${CT_BRAIN_TORCHSCRIPT_PATH:-}
+      - CT_BRAIN_CRITICAL_THRESHOLD=${CT_BRAIN_CRITICAL_THRESHOLD:-0.5}
+      - CT_BRAIN_DEVICE=cpu
+      - CT_BRAIN_CI_DUMMY_MODEL=${CT_BRAIN_CI_DUMMY_MODEL:-0}
+      - CT_BRAIN_GPU_IDLE_EMPTY_CACHE_SEC=${CT_BRAIN_GPU_IDLE_EMPTY_CACHE_SEC:-0}
+      - CT_BRAIN_GPU_IDLE_CHECK_SEC=${CT_BRAIN_GPU_IDLE_CHECK_SEC:-30}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  ultrasound:
+    build: ./services/09_ultrasound
+    ports: ["${PORT_ULTRASOUND:-8009}:8009"]
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  spine_neuro:
+    build: ./services/10_spine_neuro
+    ports: ["${PORT_SPINE_NEURO:-8010}:8010"]
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  cytology:
+    build: ./services/11_cytology
+    ports: ["${PORT_CYTOLOGY:-8011}:8011"]
+    env_file: .env
+    environment:
+      - DEVICE=cpu
+      - CLAUDE_CYTOLOGY_MODEL=${CLAUDE_CYTOLOGY_MODEL:-claude-sonnet-4-20250514}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  mammography:
+    build: ./services/12_mammography
+    ports: ["${PORT_MAMMOGRAPHY:-8012}:8012"]
+    env_file: .env
+    environment:
+      - DEVICE=cpu
+      - CLAUDE_MAMMOGRAPHY_MODEL=${CLAUDE_MAMMOGRAPHY_MODEL:-claude-sonnet-4-5}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - HF_TOKEN=${HF_TOKEN}
+      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  ecg:
+    build: ./services/13_ecg
+    ports: ["${PORT_ECG:-8013}:8013"]
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  oral_cancer:
+    build: ./services/14_oral_cancer
+    ports: ["${PORT_ORAL_CANCER:-8014}:8014"]
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    networks: [manthana]
+    restart: unless-stopped
+
+  lab_report:
+    build: ./services/15_lab_report
+    ports: ["${PORT_LAB_REPORT:-8015}:8015"]
+    env_file: .env
+    environment: [DEVICE=cpu]
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8015/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks: [manthana]
+    restart: unless-stopped
+
+  dermatology:
+    build: ./services/16_dermatology
+    ports: ["${PORT_DERMATOLOGY:-8016}:8016"]
+    env_file: .env
+    environment:
+      - DEVICE=cpu
+      - MODEL_DIR=/models
+      - CLAUDE_DERMATOLOGY_MODEL=${CLAUDE_DERMATOLOGY_MODEL:-claude-sonnet-4-20250514}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8016/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks: [manthana]
+    restart: unless-stopped

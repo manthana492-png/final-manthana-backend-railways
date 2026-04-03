@@ -1,0 +1,56 @@
+/* ═══ Print-Specific Styles ═══ */
+@media print {
+  /* Reset everything for print */
+  body {
+    background: #ffffff !important;
+    color: #1a1a1a !important;
+    font-family: "Times New Roman", Georgia, serif !important;
+    font-size: 11pt !important;
+    line-height: 1.5 !important;
+  }
+
+  /* Hide non-print elements */
+  .topbar,
+  .modality-bar,
+  .disclaimer-bar,
+  .no-print,
+  button {
+    display: none !important;
+  }
+
+  /* Reset glass panels */
+  .glass-panel,
+  .glass {
+    background: #ffffff !important;
+    border: 1px solid #ddd !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  /* Print-friendly colors */
+  .text-shimmer {
+    -webkit-text-fill-color: #1a1a1a !important;
+    background: none !important;
+    font-weight: bold !important;
+  }
+
+  /* Severity borders stay colorful */
+  .severity-critical { border-left-color: #cc0000 !important; background: #fff0f0 !important; }
+  .severity-warning { border-left-color: #cc7700 !important; background: #fffaf0 !important; }
+  .severity-clear { border-left-color: #008800 !important; background: #f0fff0 !important; }
+
+  /* Prevent page breaks inside cards */
+  [class*="finding"],
+  .glass-panel {
+    page-break-inside: avoid;
+  }
+
+  /* Show URL in footers */
+  a::after {
+    content: " (" attr(href) ")";
+    font-size: 9pt;
+    color: #666;
+  }
+}
