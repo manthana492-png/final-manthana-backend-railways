@@ -22,11 +22,35 @@ roles:
     max_tokens: 8192
     temperature: 0.2
     fallback_models: ["openai/gpt-4o-mini:online"]
+  oracle_chat_free:
+    model: "openrouter/free"
+    max_tokens: 8192
+    temperature: 0.2
+    fallback_models: [
+      "qwen/qwen3.6-plus-04-02",
+      "stepfun/step-3.5-flash",
+      "nvidia/nemotron-3-nano-30b-a3b",
+      "nvidia/nemotron-3-super-120b-a12b-20230311",
+      "arcee-ai/trinity-large-preview",
+      "moonshotai/kimi-k2.5:online"
+    ]
   oracle_m5:
     model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.15
     fallback_models: ["openai/gpt-4o-mini:online"]
+  oracle_m5_free:
+    model: "openrouter/free"
+    max_tokens: 4096
+    temperature: 0.15
+    fallback_models: [
+      "qwen/qwen3.6-plus-04-02",
+      "stepfun/step-3.5-flash",
+      "nvidia/nemotron-3-nano-30b-a3b",
+      "nvidia/nemotron-3-super-120b-a12b-20230311",
+      "arcee-ai/trinity-large-preview",
+      "moonshotai/kimi-k2.5:online"
+    ]
   ai_router_chat:
     model: "meta-llama/llama-3.3-70b-instruct"
     max_tokens: 8192
