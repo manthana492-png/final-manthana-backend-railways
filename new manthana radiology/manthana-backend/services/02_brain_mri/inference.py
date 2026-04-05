@@ -53,9 +53,11 @@ INDIA_CLINICAL_NOTE = (
 
 
 def _mri_narrative_policy() -> str:
-    v = (os.environ.get("MRI_NARRATIVE_POLICY", "kimi_then_anthropic") or "kimi_then_anthropic").strip().lower()
-    allowed = frozenset({"kimi_then_anthropic", "kimi_only", "anthropic_only", "off"})
-    return v if v in allowed else "kimi_then_anthropic"
+    """off = no LLM narrative; anything else = OpenRouter (SSOT: config/cloud_inference.yaml)."""
+    v = (os.environ.get("MRI_NARRATIVE_POLICY", "openrouter") or "openrouter").strip().lower()
+    if v == "off":
+        return "off"
+    return "openrouter"
 
 
 def _mri_narrative_vision_enabled() -> bool:
@@ -194,13 +196,6 @@ def _volume_middle_axial_b64_png(vol: np.ndarray) -> str | None:
         return None
 
 
-def _kimi_extra_body_mri(model: str) -> dict | None:
-    m = model.lower()
-    if "kimi-k2" in m:
-        return {"thinking": {"type": "disabled"}}
-    return None
-
-
 def _mri_narrative_user_text(
     pathology_scores: dict,
     impression: str,
@@ -261,98 +256,6 @@ def _mri_narrative_user_text(
     )
 
 
-def _anthropic_mri_narrative(system: str, user_text: str) -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key:
-        return ""
-    try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=key)
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-        msg = client.messages.create(
-            model=model,
-            max_tokens=1500,
-            system=system[:20000],
-            messages=[{"role": "user", "content": user_text[:120000]}],
-        )
-        block = msg.content[0]
-        return getattr(block, "text", str(block)).strip()
-    except ImportError:
-        logger.warning("anthropic package not installed; skip MRI Anthropic narrative")
-        return ""
-    except Exception as e:
-        logger.warning("MRI Anthropic narrative failed: %s", e)
-        return ""
-
-
-def _kimi_mri_openai_narrative(
-    *,
-    api_key: str,
-    base_url: str,
-    model: str,
-    image_b64: str | None,
-    system: str,
-    user_text: str,
-    use_vision: bool,
-) -> str:
-    try:
-        from openai import OpenAI
-    except ImportError:
-        logger.warning("openai package not installed; skip Kimi MRI narrative")
-        return ""
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    extra = _kimi_extra_body_mri(model)
-
-    if use_vision and image_b64:
-        try:
-            create_kw: dict = {
-                "model": model,
-                "max_tokens": 1600,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{image_b64}",
-                                },
-                            },
-                            {"type": "text", "text": user_text},
-                        ],
-                    },
-                ],
-            }
-            if extra is not None:
-                create_kw["extra_body"] = extra
-            r = client.chat.completions.create(**create_kw)
-            out = (r.choices[0].message.content or "").strip()
-            if out:
-                return out
-        except Exception as e:
-            logger.warning("Kimi vision MRI narrative failed (%s), trying text-only: %s", model, e)
-
-    try:
-        create_kw = {
-            "model": model,
-            "max_tokens": 1600,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_text},
-            ],
-        }
-        if extra is not None:
-            create_kw["extra_body"] = extra
-        r = client.chat.completions.create(**create_kw)
-        return (r.choices[0].message.content or "").strip()
-    except Exception as e:
-        logger.warning("Kimi text MRI narrative failed: %s", e)
-        return ""
-
-
 def _call_mri_narrative(
     *,
     pathology_scores: dict,
@@ -363,69 +266,51 @@ def _call_mri_narrative(
     findings: list[dict],
 ) -> tuple[str, list[str]]:
     """
-    Policy: MRI_NARRATIVE_POLICY — kimi_then_anthropic | kimi_only | anthropic_only | off.
-    Vision: MRI_NARRATIVE_VISION — when disabled, Kimi is text-only.
+    MRI_NARRATIVE_POLICY: off | openrouter (default). Legacy Kimi/Anthropic values are treated as on.
+    MRI_NARRATIVE_VISION: when disabled, text-only OpenRouter call.
     Never raises; returns ("", []) if all fail or policy is off.
     """
-    tags: list[str] = []
-    policy = _mri_narrative_policy()
-    if policy == "off":
+    if _mri_narrative_policy() == "off":
         return "", []
 
     system = _read_brain_mri_system_prompt(prompt_path)
     user_text = _mri_narrative_user_text(pathology_scores, impression, patient_context, findings)
+    tag = "OpenRouter-narrative-MRI"
 
-    kimi_key = (
-        os.environ.get("KIMI_API_KEY", "").strip()
-        or os.environ.get("MOONSHOT_API_KEY", "").strip()
-    )
-    kimi_url = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-    kimi_model = os.environ.get("KIMI_MRI_MODEL", "moonshot-v1-8k").strip()
+    try:
+        from llm_router import llm_router
+    except Exception as exc:
+        logger.warning("MRI narrative: llm_router unavailable: %s", exc)
+        return "", []
 
-    def _try_kimi() -> tuple[str, list[str]]:
-        if not kimi_key:
-            return "", []
-        if image_b64 and _mri_narrative_vision_enabled():
-            txt = _kimi_mri_openai_narrative(
-                api_key=kimi_key,
-                base_url=kimi_url,
-                model=kimi_model,
+    if image_b64 and _mri_narrative_vision_enabled():
+        try:
+            out = llm_router.complete_for_role(
+                "narrative_mri",
+                system,
+                user_text,
                 image_b64=image_b64,
-                system=system,
-                user_text=user_text,
-                use_vision=True,
+                image_mime="image/png",
+                max_tokens=1600,
             )
+            txt = (out.get("content") or "").strip()
             if txt:
-                return txt, ["Kimi-narrative-MRI"]
-        txt = _kimi_mri_openai_narrative(
-            api_key=kimi_key,
-            base_url=kimi_url,
-            model=kimi_model,
-            image_b64=None,
-            system=system,
-            user_text=user_text,
-            use_vision=False,
+                return txt, [tag]
+        except Exception as exc:
+            logger.warning("OpenRouter MRI vision narrative failed: %s", exc)
+
+    try:
+        out = llm_router.complete_for_role(
+            "narrative_mri",
+            system,
+            user_text,
+            max_tokens=1600,
         )
+        txt = (out.get("content") or "").strip()
         if txt:
-            return txt, ["Kimi-narrative-MRI"]
-        return "", []
-
-    if policy == "anthropic_only":
-        ant = _anthropic_mri_narrative(system, user_text)
-        if ant:
-            return ant, ["Anthropic-narrative-MRI"]
-        return "", []
-
-    if policy == "kimi_only":
-        return _try_kimi()
-
-    # kimi_then_anthropic
-    kt, kt_tags = _try_kimi()
-    if kt:
-        return kt, kt_tags
-    ant = _anthropic_mri_narrative(system, user_text)
-    if ant:
-        return ant, ["Anthropic-narrative-MRI"]
+            return txt, [tag]
+    except Exception as exc:
+        logger.warning("OpenRouter MRI text narrative failed: %s", exc)
     return "", []
 
 
@@ -537,7 +422,7 @@ def run_brain_mri_pipeline(
     findings_payload = [f.model_dump() if isinstance(f, Finding) else dict(f) for f in findings]
     patient_ctx = _parse_patient_context_from_notes(notes)
     _pol = _mri_narrative_policy()
-    need_vision_slice = _mri_narrative_vision_enabled() and _pol not in ("off", "anthropic_only")
+    need_vision_slice = _mri_narrative_vision_enabled() and _pol != "off"
     slice_b64 = _volume_middle_axial_b64_png(volume) if need_vision_slice else None
     llm_narr, narr_tags = _call_mri_narrative(
         pathology_scores=pathology_scores,

@@ -82,46 +82,12 @@ def _read_ct_system_prompt() -> str:
     )
 
 
-def _kimi_extra_body_ct(model: str) -> dict | None:
-    m = model.lower()
-    if "kimi-k2" in m:
-        return {"thinking": {"type": "disabled"}}
-    return None
-
-
-def _anthropic_ct_narrative(system: str, user_text: str) -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key:
-        return ""
-    try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=key)
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-        msg = client.messages.create(
-            model=model,
-            max_tokens=1600,
-            system=system[:20000],
-            messages=[{"role": "user", "content": user_text[:120000]}],
-        )
-        block = msg.content[0]
-        return getattr(block, "text", str(block)).strip()
-    except ImportError:
-        logger.warning("anthropic not installed; skip CT Anthropic narrative")
-        return ""
-    except Exception as e:
-        logger.warning("CT Anthropic narrative failed: %s", e)
-        return ""
-
-
 def _abdominal_narrative_policy() -> str:
-    """
-    CT_ABDOMINAL_NARRATIVE_POLICY:
-      - off: no LLM narrative
-      - kimi_only: Kimi only (no Anthropic)
-      - kimi_then_anthropic: Kimi first, then Anthropic (default)
-    """
-    return os.environ.get("CT_ABDOMINAL_NARRATIVE_POLICY", "kimi_then_anthropic").strip().lower()
+    """off = disabled; anything else = OpenRouter (SSOT: config/cloud_inference.yaml)."""
+    v = (os.environ.get("CT_ABDOMINAL_NARRATIVE_POLICY", "openrouter") or "openrouter").strip().lower()
+    if v in ("off", "none", "disabled", "0"):
+        return "off"
+    return "openrouter"
 
 
 def _call_ct_narrative(
@@ -132,11 +98,11 @@ def _call_ct_narrative(
     patient_context: dict | None,
 ) -> tuple[str, list[str]]:
     """
-    Provider order controlled by CT_ABDOMINAL_NARRATIVE_POLICY.
+    Controlled by CT_ABDOMINAL_NARRATIVE_POLICY (off | openrouter).
     Never raises; returns empty narrative if all fail or policy is off.
     """
     policy = _abdominal_narrative_policy()
-    if policy in ("off", "none", "disabled", "0"):
+    if policy == "off":
         return "", ["CT-narrative-disabled"]
 
     tags: list[str] = []
@@ -180,46 +146,21 @@ def _call_ct_narrative(
         "then summary, then India-context clinical correlates. Do not invent measurements or lesions."
     )
 
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if key:
-        try:
-            from openai import OpenAI
-        except ImportError:
-            logger.warning("openai not installed; skip CT Kimi narrative")
-        else:
-            base_url = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-            model = (
-                os.environ.get("KIMI_CT_MODEL", "").strip()
-                or os.environ.get("KIMI_MODEL", "kimi-k2.5").strip()
-            )
-            extra = _kimi_extra_body_ct(model)
-            try:
-                client = OpenAI(api_key=key, base_url=base_url)
-                create_kw: dict = {
-                    "model": model,
-                    "max_tokens": 1600,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_text},
-                    ],
-                }
-                if extra is not None:
-                    create_kw["extra_body"] = extra
-                r = client.chat.completions.create(**create_kw)
-                out = (r.choices[0].message.content or "").strip()
-                if out:
-                    tags.append("Kimi-narrative-CT")
-                    return out, tags
-            except Exception as e:
-                logger.warning("CT Kimi narrative failed: %s", e)
+    try:
+        from llm_router import llm_router
 
-    if policy in ("kimi_only", "kimi_strict"):
-        return "", tags
-
-    ant = _anthropic_ct_narrative(system, user_text)
-    if ant:
-        tags.append("Anthropic-narrative-CT")
-        return ant, tags
+        out = llm_router.complete_for_role(
+            "narrative_ct",
+            system,
+            user_text,
+            max_tokens=1600,
+        )
+        txt = (out.get("content") or "").strip()
+        if txt:
+            tags.append("OpenRouter-narrative-CT")
+            return txt, tags
+    except Exception as e:
+        logger.warning("Abdominal CT OpenRouter narrative failed: %s", e)
     return "", tags
 
 

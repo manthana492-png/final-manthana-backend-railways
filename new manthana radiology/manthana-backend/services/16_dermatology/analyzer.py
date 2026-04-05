@@ -1,5 +1,6 @@
 """
-Manthana Dermatology Engine — Kimi K2.5 vision (DermAI system prompt) + structured scores + narrative.
+Manthana Dermatology Engine — OpenRouter vision (DermAI system prompt; SSOT config/cloud_inference.yaml)
++ structured scores + narrative.
 V2: optional EfficientNet-B4 checkpoint replaces the score-extraction API call only.
 """
 
@@ -12,7 +13,6 @@ import logging
 import os
 import re
 import sys
-import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -38,9 +38,6 @@ DERMAI_SYSTEM_PATH = Path(__file__).parent / "prompts" / "dermatology_dermai_sys
 
 _derm_classifier: Any = None
 _dermai_system_text: str | None = None
-_openai_client_lock = threading.Lock()
-_openai_client_sig: tuple[Any, ...] | None = None
-_openai_client: Any = None
 
 
 def _try_load_classifier() -> None:
@@ -61,70 +58,11 @@ def _try_load_classifier() -> None:
         logger.debug("V2 classifier not loaded: %s", e)
 
 
-def _make_openai_client(
-    api_key: str,
-    base_url: str,
-    *,
-    timeout_sec: float,
-    max_retries: int,
-) -> Any:
-    from openai import OpenAI
-
-    return OpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        timeout=timeout_sec,
-        max_retries=max_retries,
-    )
-
-
-def _get_openai_client() -> Any:
-    """Thread-safe singleton; recreates client when key/base_url/timeout/retry change."""
-    global _openai_client_sig, _openai_client
-    from config import (
-        KIMI_API_KEY,
-        KIMI_BASE_URL,
-        KIMI_DERMATOLOGY_MAX_RETRIES,
-        KIMI_DERMATOLOGY_TIMEOUT_SEC,
-    )
-
-    api_key = (KIMI_API_KEY or "").strip()
-    base_url = (KIMI_BASE_URL or "https://api.moonshot.ai/v1").strip()
-    sig = (
-        api_key,
-        base_url,
-        float(KIMI_DERMATOLOGY_TIMEOUT_SEC),
-        int(KIMI_DERMATOLOGY_MAX_RETRIES),
-    )
-    with _openai_client_lock:
-        if _openai_client is None or _openai_client_sig != sig:
-            _openai_client = _make_openai_client(
-                api_key,
-                base_url,
-                timeout_sec=float(KIMI_DERMATOLOGY_TIMEOUT_SEC),
-                max_retries=int(KIMI_DERMATOLOGY_MAX_RETRIES),
-            )
-            _openai_client_sig = sig
-        return _openai_client
-
-
 def _load_dermai_system_prompt() -> str:
     global _dermai_system_text
     if _dermai_system_text is None:
         _dermai_system_text = DERMAI_SYSTEM_PATH.read_text(encoding="utf-8")
     return _dermai_system_text
-
-
-def _kimi_extra_body(model: str) -> dict | None:
-    """Moonshot kimi-k2.5: thinking on/off only (see platform.moonshot.ai K2.5 docs)."""
-    m = (model or "").lower()
-    if "kimi-k2" not in m:
-        return None
-    from config import KIMI_DERMATOLOGY_THINKING
-
-    if KIMI_DERMATOLOGY_THINKING == "disabled":
-        return {"thinking": {"type": "disabled"}}
-    return {"thinking": {"type": "enabled"}}
 
 
 def _sniff_media_type(image_bytes: bytes) -> str:
@@ -135,19 +73,46 @@ def _sniff_media_type(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-def _jpeg_data_url_from_bytes(image_bytes: bytes) -> str:
-    """Normalize to JPEG data URL for Kimi vision (matches lab_report pattern)."""
-    raw = image_bytes
+def _vision_b64_and_mime(image_bytes: bytes) -> tuple[str, str]:
+    """Raw base64 + mime for OpenRouter vision."""
     try:
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
-        jpeg_b64 = base64.b64encode(buf.getvalue()).decode()
-        return f"data:image/jpeg;base64,{jpeg_b64}"
+        return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
     except Exception:
-        b64 = base64.b64encode(raw).decode()
-        mt = _sniff_media_type(raw)
-        return f"data:{mt};base64,{b64}"
+        b64 = base64.b64encode(image_bytes).decode()
+        return b64, _sniff_media_type(image_bytes)
+
+
+def _openrouter_derm_complete(
+    *,
+    system_prompt: str,
+    user_text: str,
+    image_b64: str | None,
+    image_mime: str,
+    max_tokens: int,
+    requires_json: bool,
+    call_label: str,
+) -> tuple[str, str]:
+    """Returns (content, model_used_slug). Raises on failure."""
+    from llm_router import llm_router
+
+    t0 = time.perf_counter()
+    out = llm_router.complete_for_role(
+        "dermatology",
+        system_prompt,
+        user_text,
+        max_tokens=max_tokens,
+        requires_json=requires_json,
+        image_b64=image_b64,
+        image_mime=image_mime,
+    )
+    elapsed = time.perf_counter() - t0
+    logger.debug("%s: OpenRouter complete_for_role done in %.2fs", call_label, elapsed)
+    text = (out.get("content") or "").strip()
+    mu = str(out.get("model_used") or "").strip()
+    return text, mu
 
 
 def _parse_json_from_llm(text: str) -> dict[str, Any]:
@@ -201,61 +166,12 @@ def _normalize_condition_scores(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _kimi_chat_completion(
-    *,
-    system_prompt: str,
-    user_content: str | list[dict[str, Any]],
-    max_tokens: int,
-    call_label: str = "kimi",
-) -> str:
-    from config import KIMI_API_KEY, KIMI_DERMATOLOGY_MODEL
-
-    api_key = (KIMI_API_KEY or "").strip()
-    if not api_key:
-        raise RuntimeError("KIMI_API_KEY or MOONSHOT_API_KEY is not set")
-
-    model = (KIMI_DERMATOLOGY_MODEL or "kimi-k2.5").strip()
-    extra = _kimi_extra_body(model)
-    client = _get_openai_client()
-
-    create_kw: dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "max_tokens": max_tokens,
-    }
-    if extra is not None:
-        create_kw["extra_body"] = extra
-
-    t0 = time.perf_counter()
-    try:
-        resp = client.chat.completions.create(**create_kw)
-    except Exception as e:
-        logger.exception("%s: Kimi API request failed: %s", call_label, e)
-        raise
-    elapsed = time.perf_counter() - t0
-    logger.debug("%s: Kimi chat.completions done in %.2fs", call_label, elapsed)
-
-    msg = resp.choices[0].message
-    text = (msg.content or "").strip()
-    if hasattr(msg, "reasoning_content"):
-        rc = getattr(msg, "reasoning_content", None)
-        if rc and not text:
-            logger.warning(
-                "%s: Kimi returned empty content; reasoning present only (truncation?)",
-                call_label,
-            )
-    return text
-
-
-def _get_kimi_condition_scores(
+def _get_openrouter_condition_scores(
     patient_context: dict[str, Any],
     system_prompt: str,
-    image_data_url: str,
-) -> dict[str, Any]:
-    """Kimi K2.5 vision — JSON condition scores for pipeline compatibility."""
+    image_bytes: bytes,
+) -> tuple[dict[str, Any], str]:
+    """OpenRouter vision — JSON condition scores for pipeline compatibility."""
     score_user = (
         "Apply your full diagnostic framework (Steps 1–5) for this skin photograph.\n\n"
         "Your final assistant message must be ONLY valid JSON (no markdown fences, no commentary) "
@@ -268,18 +184,18 @@ def _get_kimi_condition_scores(
         "Patient context (may be empty): "
         + json.dumps(patient_context, ensure_ascii=False)
     )
-    user_content: list[dict[str, Any]] = [
-        {"type": "image_url", "image_url": {"url": image_data_url}},
-        {"type": "text", "text": score_user},
-    ]
-    text = _kimi_chat_completion(
+    b64, mime = _vision_b64_and_mime(image_bytes)
+    text, model_used = _openrouter_derm_complete(
         system_prompt=system_prompt,
-        user_content=user_content,
-        max_tokens=int(os.getenv("KIMI_DERMATOLOGY_SCORE_MAX_TOKENS", "8192")),
+        user_text=score_user,
+        image_b64=b64,
+        image_mime=mime,
+        max_tokens=int(os.getenv("DERM_SCORE_MAX_TOKENS", os.getenv("KIMI_DERMATOLOGY_SCORE_MAX_TOKENS", "8192"))),
+        requires_json=True,
         call_label="derm_scores",
     )
     raw = _parse_json_from_llm(text)
-    return _normalize_condition_scores(raw)
+    return _normalize_condition_scores(raw), model_used
 
 
 def _build_findings(
@@ -334,7 +250,7 @@ def analyze_dermatology(
 ) -> dict[str, Any]:
     """
     Full pipeline. Returns a dict suitable for AnalysisResponse(**d).
-    Two Kimi calls when scores come from vision; one Kimi call if V2 classifier supplies scores.
+    Two OpenRouter calls when scores come from vision; one OpenRouter call if V2 classifier supplies scores.
     """
     _try_load_classifier()
 
@@ -349,16 +265,16 @@ def analyze_dermatology(
         )
 
     system_prompt = _load_dermai_system_prompt()
-    image_data_url = _jpeg_data_url_from_bytes(image_bytes)
+    score_model_slug = ""
 
     if _derm_classifier is not None:
         condition_scores = _derm_classifier.classify(pil_image)
         classifier_mode = "efficientnet_b4"
     else:
-        condition_scores = _get_kimi_condition_scores(
-            patient_context, system_prompt, image_data_url
+        condition_scores, score_model_slug = _get_openrouter_condition_scores(
+            patient_context, system_prompt, image_bytes
         )
-        classifier_mode = "kimi_k2.5_vision_v1"
+        classifier_mode = "openrouter_vision_v1"
 
     critical = check_derm_critical(condition_scores)
 
@@ -379,23 +295,21 @@ def analyze_dermatology(
         ensure_ascii=False,
     )
 
-    narrative_user: list[dict[str, Any]] = [
-        {"type": "image_url", "image_url": {"url": image_data_url}},
-        {
-            "type": "text",
-            "text": (
-                f"QUANTITATIVE MEASUREMENTS:\n{measurements_json}\n\n"
-                "Generate the dermatology assessment report following your instructions "
-                "(morphology, differential, India context, safety). "
-                "If your instructions include a JSON structured block for narrative output, you may use it; "
-                "otherwise use clear section headings including IMPRESSION."
-            ),
-        },
-    ]
-    report_text = _kimi_chat_completion(
+    narr_b64, narr_mime = _vision_b64_and_mime(image_bytes)
+    narrative_user_text = (
+        f"QUANTITATIVE MEASUREMENTS:\n{measurements_json}\n\n"
+        "Generate the dermatology assessment report following your instructions "
+        "(morphology, differential, India context, safety). "
+        "If your instructions include a JSON structured block for narrative output, you may use it; "
+        "otherwise use clear section headings including IMPRESSION."
+    )
+    report_text, narr_model_slug = _openrouter_derm_complete(
         system_prompt=system_prompt,
-        user_content=narrative_user,
-        max_tokens=int(os.getenv("KIMI_DERMATOLOGY_NARRATIVE_MAX_TOKENS", "16384")),
+        user_text=narrative_user_text,
+        image_b64=narr_b64,
+        image_mime=narr_mime,
+        max_tokens=int(os.getenv("DERM_NARRATIVE_MAX_TOKENS", os.getenv("KIMI_DERMATOLOGY_NARRATIVE_MAX_TOKENS", "16384"))),
+        requires_json=False,
         call_label="derm_narrative",
     )
 
@@ -407,15 +321,17 @@ def analyze_dermatology(
     findings = _build_findings(condition_scores, critical)
     impression = _extract_impression(report_text)
 
-    from config import KIMI_DERMATOLOGY_MODEL
-
-    kimi_model = KIMI_DERMATOLOGY_MODEL or "kimi-k2.5"
     models_used: list[str] = []
     if classifier_mode == "efficientnet_b4":
         models_used.append("EfficientNet-B4-derm")
     else:
-        models_used.append("kimi-k2.5-vision-derm-scores")
-    models_used.append(str(kimi_model))
+        models_used.append("openrouter-vision-derm-scores")
+        if score_model_slug:
+            models_used.append(score_model_slug)
+    if narr_model_slug:
+        models_used.append(narr_model_slug)
+    else:
+        models_used.append("openrouter-dermatology")
 
     return {
         "job_id": job_id or "",
@@ -439,34 +355,26 @@ def analyze_dermatology(
 
 
 def get_ready() -> dict[str, Any]:
-    """Ready when Kimi (Moonshot) API key is set; V2 weights optional."""
-    from config import (
-        CHECKPOINT_FILENAME,
-        DEVICE,
-        KIMI_API_KEY,
-        KIMI_BASE_URL,
-        KIMI_DERMATOLOGY_MODEL,
-        KIMI_DERMATOLOGY_MAX_RETRIES,
-        KIMI_DERMATOLOGY_TIMEOUT_SEC,
-        MODEL_DIR,
-    )
+    """Ready when OPENROUTER_API_KEY is set; V2 weights optional."""
+    from config import CHECKPOINT_FILENAME, DEVICE, MODEL_DIR
 
-    key_ok = bool((KIMI_API_KEY or "").strip())
+    key_ok = False
+    for name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"):
+        k = (os.environ.get(name) or "").strip()
+        if k and len(k) >= 8:
+            key_ok = True
+            break
     prompt_ok = DERMAI_SYSTEM_PATH.is_file()
     wpath = Path(MODEL_DIR) / CHECKPOINT_FILENAME
     has_v2 = wpath.is_file()
     ready = key_ok and prompt_ok
     return {
         "ready": ready,
-        "classifier": "loaded" if has_v2 else "kimi_k2.5_vision_v1",
+        "classifier": "loaded" if has_v2 else "openrouter_vision_v1",
         "device": DEVICE,
-        "mode": "efficientnet_b4" if has_v2 else "kimi_k2.5_vision_v1",
-        "kimi_configured": key_ok,
+        "mode": "efficientnet_b4" if has_v2 else "openrouter_vision_v1",
+        "openrouter_configured": key_ok,
         "dermai_prompt_present": prompt_ok,
-        "kimi_model": KIMI_DERMATOLOGY_MODEL,
-        "kimi_base_url": KIMI_BASE_URL,
-        "kimi_timeout_sec": KIMI_DERMATOLOGY_TIMEOUT_SEC,
-        "kimi_max_retries": KIMI_DERMATOLOGY_MAX_RETRIES,
     }
 
 
@@ -476,12 +384,11 @@ def run_dermatology_pipeline_b64(
     job_id: str = "",
     filename_hint: str = "",
 ) -> dict[str, Any]:
-    """ZeroClaw / agent entry; requires KIMI_API_KEY or MOONSHOT_API_KEY."""
+    """ZeroClaw / agent entry; requires OPENROUTER_API_KEY."""
     _ = filename_hint
-    from config import KIMI_API_KEY
 
-    if not (KIMI_API_KEY or "").strip():
-        raise RuntimeError("KIMI_API_KEY or MOONSHOT_API_KEY is not set")
+    if not get_ready().get("openrouter_configured"):
+        raise RuntimeError("OPENROUTER_API_KEY is not set (see config/cloud_inference.yaml).")
     return analyze_dermatology(
         image_b64,
         patient_context or {},

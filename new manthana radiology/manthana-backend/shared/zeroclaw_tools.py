@@ -929,7 +929,8 @@ TOOLS: list[dict[str, Any]] = [
                 "Analyse a skin or dermatology image: 12 India-relevant conditions "
                 "(tinea, vitiligo, psoriasis, melasma, acne, eczema, scabies, urticaria, "
                 "BCC, SCC, melanoma, normal/benign), malignancy screening, and narrative report. "
-                "Requires ANTHROPIC_API_KEY. Returns structured findings and pathology_scores."
+                "Requires OPENROUTER_API_KEY (cloud SSOT: config/cloud_inference.yaml). "
+                "Returns structured findings and pathology_scores."
             ),
             "parameters": {
                 "type": "object",

@@ -3,20 +3,22 @@ Manthana — Lab Report Analyzer (V2 with Parrotlet-v-lite-4b)
 
 Architecture:
 1. Structured parsing (Parrotlet-v-lite-4b) → Extracts structured data from PDF/image
-2. Clinical interpretation (Kimi K2.5 / Moonshot OpenAI-compatible API only)
+2. Clinical interpretation (OpenRouter; SSOT config/cloud_inference.yaml role lab_report)
 3. Correlation-ready output → labs/structured fields for correlation_engine
 
 Benefits:
 - Better accuracy on scanned documents (OCR + vision model)
 - Structured data enables correlation rules to fire properly
-- Single LLM provider (no DeepSeek/Gemini/Groq chain)
+- Single cloud LLM path (OpenRouter)
 - Handles both text PDFs and image-based reports
 """
 
 import os
+import sys
 import json
 import re
 import logging
+from pathlib import Path
 from typing import Optional
 
 from critical_values import check_critical_values, normalize_labs_for_critical
@@ -24,16 +26,15 @@ from critical_values import check_critical_values, normalize_labs_for_critical
 logger = logging.getLogger("manthana.lab_analyzer")
 
 
-def _make_openai_client(api_key: str, base_url: str = None):
-    """Safe OpenAI client factory — strips proxies kwarg for openai>=1.0."""
-    import httpx
-    from openai import OpenAI
+def _shared_path() -> Path:
+    return Path(__file__).resolve().parent.parent.parent / "shared"
 
-    kwargs = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
-    kwargs["http_client"] = httpx.Client(timeout=60.0, follow_redirects=True)
-    return OpenAI(**kwargs)
+
+def _ensure_shared_on_path() -> None:
+    for p in (Path("/app/shared"), _shared_path()):
+        s = str(p.resolve())
+        if p.is_dir() and s not in sys.path:
+            sys.path.insert(0, s)
 
 
 def parse_clinical_notes(raw: str) -> dict:
@@ -143,7 +144,7 @@ def analyze_lab_report(
     patient_context: Optional[dict] = None,
 ) -> dict:
     """
-    Analyze a lab report file using structured parsing + Kimi K2.5.
+    Analyze a lab report file using structured parsing + OpenRouter.
     
     Args:
         filepath: Path to the lab report file
@@ -229,7 +230,7 @@ def analyze_lab_report(
             output = _merge_outputs(None, interpretation, "")
             return _finalize_lab_output(output)
 
-    # Step 3: Clinical interpretation via Kimi
+    # Step 3: Clinical interpretation via OpenRouter
     if structured_result and structured_result.get("structured"):
         interpretation = _interpret_with_structured(
             structured=structured_result["structured"],
@@ -329,7 +330,7 @@ def _interpret_with_structured(
     raw_text: str,
     patient_context: Optional[dict],
 ) -> dict:
-    """Interpret MedGemma-parsed structured data with India-focused Kimi K2.5 clinical analysis."""
+    """Interpret structured parser output with India-focused clinical analysis (OpenRouter)."""
     structured_json = json.dumps(structured, indent=2, default=str)[:8000]
 
     user_prompt = (
@@ -341,7 +342,7 @@ def _interpret_with_structured(
         user_prompt += f"\nPATIENT CONTEXT:\n{json.dumps(patient_context, indent=2)}\n"
     user_prompt += f"\nRespond ONLY with valid JSON matching this schema:\n{_INDIA_JSON_SCHEMA}"
 
-    return _call_kimi(_INDIA_SYSTEM_STRUCTURED, user_prompt)
+    return _call_openrouter_lab(_INDIA_SYSTEM_STRUCTURED, user_prompt)
 
 
 _INDIA_SYSTEM_TEXT = """\
@@ -361,7 +362,7 @@ India-specific clinical interpretation. Respond ONLY with valid JSON.\
 
 
 def _interpret_raw_text(raw_text: str, patient_context: Optional[dict]) -> dict:
-    """Interpret raw lab report text with India-focused Kimi K2.5 clinical analysis."""
+    """Interpret raw lab report text with India-focused clinical analysis (OpenRouter)."""
     user_prompt = (
         f"Analyze this Indian lab report text and extract all values, flag abnormals, "
         f"and provide India-specific clinical interpretation:\n\n"
@@ -371,50 +372,38 @@ def _interpret_raw_text(raw_text: str, patient_context: Optional[dict]) -> dict:
         user_prompt += f"\n\nPatient context: {json.dumps(patient_context)}"
     user_prompt += f"\n\nRespond ONLY with valid JSON matching this schema:\n{_INDIA_JSON_SCHEMA}"
 
-    return _call_kimi(_INDIA_SYSTEM_TEXT, user_prompt)
+    return _call_openrouter_lab(_INDIA_SYSTEM_TEXT, user_prompt)
 
 
-def _kimi_extra_body(model: str) -> dict | None:
-    """Kimi K2.x: optional thinking control (Moonshot API)."""
-    m = (model or "").lower()
-    if "kimi-k2" in m:
-        return {"thinking": {"type": "disabled"}}
-    return None
-
-
-def _call_kimi(system_prompt: str, user_prompt: str) -> dict:
-    """Clinical JSON interpretation via Kimi K2.5 only (Moonshot OpenAI-compatible)."""
-    from config import KIMI_API_KEY, KIMI_BASE_URL, KIMI_LAB_MODEL
-
-    api_key = (KIMI_API_KEY or "").strip()
-    if not api_key:
-        return _fallback_response("KIMI_API_KEY or MOONSHOT_API_KEY not set")
-
-    base_url = (KIMI_BASE_URL or "https://api.moonshot.ai/v1").strip()
-    model = (KIMI_LAB_MODEL or "kimi-k2.5").strip()
-    extra = _kimi_extra_body(model)
-    client = _make_openai_client(api_key=api_key, base_url=base_url)
+def _call_openrouter_lab(system_prompt: str, user_prompt: str) -> dict:
+    """Clinical JSON interpretation via OpenRouter (role lab_report)."""
+    _ensure_shared_on_path()
+    try:
+        from llm_router import llm_router
+    except Exception as e:
+        logger.warning("llm_router import failed: %s", e)
+        return _fallback_response("LLM router not available")
 
     try:
-        create_kw: dict = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 4096,
-        }
-        if extra is not None:
-            create_kw["extra_body"] = extra
-        response = client.chat.completions.create(**create_kw)
-        raw = (response.choices[0].message.content or "").strip()
-        parsed = _parse_llm_response(raw)
-        parsed["_llm_model_used"] = f"kimi:{model}"
-        return parsed
-    except Exception as e:
-        logger.error("Kimi API error: %s", e)
+        out = llm_router.complete_for_role(
+            "lab_report",
+            system_prompt,
+            user_prompt,
+            temperature=0.1,
+            max_tokens=4096,
+            requires_json=True,
+        )
+    except ValueError as e:
         return _fallback_response(str(e))
+    except Exception as e:
+        logger.error("OpenRouter lab interpretation error: %s", e)
+        return _fallback_response(str(e))
+
+    raw = (out.get("content") or "").strip()
+    parsed = _parse_llm_response(raw)
+    mu = str(out.get("model_used") or "").strip()
+    parsed["_llm_model_used"] = f"openrouter:{mu}" if mu else "openrouter:lab_report"
+    return parsed
 
 
 def _parse_llm_response(raw: str) -> dict:
@@ -477,7 +466,7 @@ def _merge_outputs(
     interpretation: dict,
     raw_text: str,
 ) -> dict:
-    """Merge parser output with Kimi interpretation."""
+    """Merge parser output with LLM interpretation."""
     output = {
         "modality": "lab_report",
         "findings": interpretation.get("findings", []),
@@ -502,12 +491,12 @@ def _merge_outputs(
         output["flattened_labs"] = {}
         output["parser_used"] = "text_only"
     
-    # Add models used (LLM: Kimi K2.5)
+    # Add models used (LLM via OpenRouter)
     llm_label = "Manthana Report AI"
     if isinstance(interpretation, dict) and interpretation.get("_llm_model_used"):
         m = interpretation["_llm_model_used"]
-        if "kimi" in m.lower():
-            llm_label = "Kimi K2.5"
+        if "openrouter" in m.lower():
+            llm_label = m.split(":", 1)[-1] if ":" in m else "OpenRouter"
         else:
             llm_label = m
     models_used = [output["parser_used"], llm_label]
@@ -555,15 +544,16 @@ def run_lab_report_pipeline_b64(
 
 
 def is_service_ready() -> dict:
-    """Kimi (Moonshot) required for readiness; Parrotlet optional."""
-    from config import KIMI_API_KEY, KIMI_LAB_MODEL, KIMI_MODEL
-
-    kk = (KIMI_API_KEY or "").strip()
-    kimi_ok = bool(kk)
+    """OPENROUTER_API_KEY required for readiness; Parrotlet optional."""
+    or_ok = False
+    for name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"):
+        k = (os.environ.get(name) or "").strip()
+        if k and len(k) >= 8:
+            or_ok = True
+            break
     return {
-        "kimi_configured": kimi_ok,
-        "kimi_model": KIMI_LAB_MODEL or KIMI_MODEL,
+        "openrouter_configured": or_ok,
         "parrotlet_available": PARROTV_AVAILABLE,
-        "ready": kimi_ok,
-        "full_pipeline": kimi_ok and PARROTV_AVAILABLE,
+        "ready": or_ok,
+        "full_pipeline": or_ok and PARROTV_AVAILABLE,
     }

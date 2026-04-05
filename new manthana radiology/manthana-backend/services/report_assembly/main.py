@@ -1,7 +1,6 @@
 """
 Manthana — Report Assembly Service
-Generates narrative radiology reports using LLM APIs.
-DeepSeek V3 → Gemini Flash → Groq → Qwen 2.5
+Generates narrative radiology reports via OpenRouter (SSOT: config/cloud_inference.yaml).
 Supports 10 Indian languages natively.
 """
 

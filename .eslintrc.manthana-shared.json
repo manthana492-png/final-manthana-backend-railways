@@ -2,7 +2,10 @@
   "overrides": [
     {
       "files": [
-        "manthana-radio-frontend/**/*.{ts,tsx}"
+        "oracle-2/frontend-manthana/manthana/src/components/analyse/**/*.{ts,tsx}",
+        "oracle-2/frontend-manthana/manthana/src/hooks/analyse/**/*.{ts,tsx}",
+        "oracle-2/frontend-manthana/manthana/src/lib/analyse/**/*.{ts,tsx}",
+        "oracle-2/frontend-manthana/manthana/src/app/(analyse)/**/*.{ts,tsx}"
       ],
       "rules": {
         "no-restricted-imports": [

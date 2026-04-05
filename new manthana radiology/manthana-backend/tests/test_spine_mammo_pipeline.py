@@ -99,7 +99,7 @@ class TestMammoPipeline:
 
         assert any("pipeline" in f and "b64" in f for f in dir(mi))
 
-    @patch("inference._mammo_narrative_kimi_then_claude", return_value=("", []))
+    @patch("inference._mammo_narrative_openrouter", return_value=("", []))
     @patch("inference._run_mirai", return_value={"available": False})
     def test_mammo_inference_runs(self, *_mocks: object) -> None:
         for m in ("config", "inference"):
@@ -159,7 +159,7 @@ class TestMammoPipeline:
             f.write(buf.getvalue())
             f.close()
             with patch("inference._heuristic_mammo_from_path", return_value=(fake_st, fake_sc)):
-                with patch("inference._mammo_narrative_kimi_then_claude", return_value=("", [])):
+                with patch("inference._mammo_narrative_openrouter", return_value=("", [])):
                     with patch(
                         "inference._run_mirai",
                         return_value={"available": False},

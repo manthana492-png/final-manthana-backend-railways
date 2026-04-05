@@ -203,7 +203,7 @@ class TestPipelineMocked:
     def setup_method(self) -> None:
         _setup_mammo_path()
 
-    @patch("inference._mammo_narrative_kimi_then_claude", return_value=("Test report.", []))
+    @patch("inference._mammo_narrative_openrouter", return_value=("Test report.", []))
     @patch("inference._run_mirai")
     def test_four_views_calls_mirai(self, mock_mirai, _mock_claude) -> None:
         mock_mirai.return_value = {
@@ -238,7 +238,7 @@ class TestPipelineMocked:
         finally:
             os.unlink(tmp)
 
-    @patch("inference._mammo_narrative_kimi_then_claude", return_value=("Visual only.", []))
+    @patch("inference._mammo_narrative_openrouter", return_value=("Visual only.", []))
     @patch("inference._run_mirai")
     def test_single_image_skips_mirai(self, mock_mirai, _mock_claude) -> None:
         from inference import run_pipeline
@@ -257,7 +257,7 @@ class TestSingleImageNoFabricatedScores:
     def setup_method(self) -> None:
         _setup_mammo_path()
 
-    @patch("inference._mammo_narrative_kimi_then_claude", return_value=("", []))
+    @patch("inference._mammo_narrative_openrouter", return_value=("", []))
     @patch("inference._run_mirai")
     def test_single_image_pathology_scores_include_heuristics(self, mock_mirai, _mock_narr) -> None:
         from inference import run_pipeline

@@ -1,6 +1,6 @@
 """
 Lab report E2E pipeline: base64 decode → analyze_lab_report → structured enrichment,
-deterministic pathology score hints, Kimi K2.5 narrative only.
+deterministic pathology score hints, OpenRouter narrative.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,18 +20,6 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger("manthana.lab_inference")
 
 _FLAGS = frozenset({"H", "L", "HH", "LL", "CRITICAL"})
-
-
-def _make_openai_client(api_key: str, base_url: str = None):
-    """Safe OpenAI client factory — strips proxies kwarg for openai>=1.0."""
-    import httpx
-    from openai import OpenAI
-
-    kwargs = {"api_key": api_key}
-    if base_url:
-        kwargs["base_url"] = base_url
-    kwargs["http_client"] = httpx.Client(timeout=60.0, follow_redirects=True)
-    return OpenAI(**kwargs)
 
 
 def _find_shared() -> Optional[str]:
@@ -299,24 +288,20 @@ def _india_context(
     return ctx
 
 
-def _kimi_extra_body(model: str) -> dict | None:
-    m = (model or "").lower()
-    if "kimi-k2" in m:
-        return {"thinking": {"type": "disabled"}}
-    return None
-
-
 def _call_lab_narrative(
     text_summary: str,
     image_b64: str = None,
     patient_context: dict = None,
 ) -> tuple[str, list]:
-    from config import KIMI_API_KEY, KIMI_BASE_URL, KIMI_LAB_MODEL
-
-    kimi_key = (KIMI_API_KEY or "").strip()
-    kimi_base = (KIMI_BASE_URL or "https://api.moonshot.ai/v1").strip()
-    kimi_model = (KIMI_LAB_MODEL or "kimi-k2.5").strip()
-    extra = _kimi_extra_body(kimi_model)
+    _ = patient_context
+    sp = _find_shared()
+    if sp and sp not in sys.path:
+        sys.path.insert(0, sp)
+    try:
+        from llm_router import llm_router
+    except Exception as e:
+        logging.getLogger("manthana.lab").warning("llm_router unavailable for lab narrative: %s", e)
+        return "", []
 
     system_prompt = (
         "You are a senior clinical pathologist in India. "
@@ -325,66 +310,46 @@ def _call_lab_narrative(
         "Include Indian epidemiological context (TB, dengue, anaemia prevalence). "
         "End with: 'This is an AI-assisted interpretation. Clinical correlation required.'"
     )
-    _ = patient_context
 
-    if kimi_key and image_b64:
-        try:
-            from PIL import Image as _PIL
+    try:
+        if image_b64:
+            try:
+                from PIL import Image as _PIL
 
-            raw = base64.b64decode(image_b64)
-            img = _PIL.open(io.BytesIO(raw)).convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85)
-            jpeg_b64 = base64.b64encode(buf.getvalue()).decode()
+                raw = base64.b64decode(image_b64)
+                img = _PIL.open(io.BytesIO(raw)).convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                jpeg_b64 = base64.b64encode(buf.getvalue()).decode()
+                out = llm_router.complete_for_role(
+                    "lab_report",
+                    system_prompt,
+                    text_summary,
+                    image_b64=jpeg_b64,
+                    image_mime="image/jpeg",
+                    max_tokens=1500,
+                    temperature=0.2,
+                )
+                narrative = (out.get("content") or "").strip()
+                mu = str(out.get("model_used") or "").strip()
+                if narrative:
+                    return narrative, [f"openrouter-vision-lab:{mu}" if mu else "openrouter-vision-lab"]
+            except Exception as e:
+                logging.getLogger("manthana.lab").warning("OpenRouter vision lab narrative failed: %s", e)
 
-            client = _make_openai_client(kimi_key, kimi_base)
-            create_kw: dict = {
-                "model": kimi_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{jpeg_b64}"},
-                            },
-                            {"type": "text", "text": text_summary},
-                        ],
-                    },
-                ],
-                "max_tokens": 1500,
-                "temperature": 0.2,
-            }
-            if extra is not None:
-                create_kw["extra_body"] = extra
-            resp = client.chat.completions.create(**create_kw)
-            narrative = (resp.choices[0].message.content or "").strip()
-            if narrative:
-                return narrative, ["Kimi-vision-Lab"]
-        except Exception as e:
-            logging.getLogger("manthana.lab").warning(f"Kimi vision lab failed: {e}")
-
-    if kimi_key:
-        try:
-            client = _make_openai_client(kimi_key, kimi_base)
-            create_kw = {
-                "model": kimi_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text_summary},
-                ],
-                "max_tokens": 1500,
-                "temperature": 0.2,
-            }
-            if extra is not None:
-                create_kw["extra_body"] = extra
-            resp = client.chat.completions.create(**create_kw)
-            narrative = (resp.choices[0].message.content or "").strip()
-            if narrative:
-                return narrative, ["Kimi-text-Lab"]
-        except Exception as e:
-            logging.getLogger("manthana.lab").warning(f"Kimi text lab failed: {e}")
+        out2 = llm_router.complete_for_role(
+            "lab_report",
+            system_prompt,
+            text_summary,
+            max_tokens=1500,
+            temperature=0.2,
+        )
+        narrative2 = (out2.get("content") or "").strip()
+        mu2 = str(out2.get("model_used") or "").strip()
+        if narrative2:
+            return narrative2, [f"openrouter-text-lab:{mu2}" if mu2 else "openrouter-text-lab"]
+    except Exception as e:
+        logging.getLogger("manthana.lab").warning("OpenRouter lab narrative failed: %s", e)
 
     return "", []
 

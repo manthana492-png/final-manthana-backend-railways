@@ -50,7 +50,6 @@ from totalseg_runner import (
 
 logger = logging.getLogger("manthana.spine_neuro")
 PIPELINE_VERSION = "manthana-spine-v3"
-CLAUDE_MODEL = os.environ.get("CLAUDE_SPINE_MODEL", "claude-sonnet-4-5")
 
 _DEFAULT_LEVELS = ["L1", "L2", "L3", "L4", "L5", "S1"]
 _DISC_LEVELS = ["L1-L2", "L2-L3", "L3-L4", "L4-L5", "L5-S1"]
@@ -268,39 +267,34 @@ def _build_clinical_spine_structures(
 
 
 def _spine_narrative_policy() -> str:
-    """
-    CT_SPINE_NARRATIVE_POLICY:
-      - off: no narrative
-      - kimi_only: Kimi only
-      - anthropic_only: Claude only (no Kimi)
-      - kimi_then_anthropic: Kimi first, then Claude (default)
-    """
-    return os.environ.get("CT_SPINE_NARRATIVE_POLICY", "kimi_then_anthropic").strip().lower()
+    """CT_SPINE_NARRATIVE_POLICY: off | openrouter (default). Legacy Kimi/Anthropic values enable OpenRouter."""
+    v = (os.environ.get("CT_SPINE_NARRATIVE_POLICY", "openrouter") or "openrouter").strip().lower()
+    if v in ("off", "none", "disabled", "0"):
+        return "off"
+    return "openrouter"
 
 
-def _call_kimi_spine_narrative(
+def _spine_narrative_openrouter(
     structures: dict[str, Any],
-    scores: dict[str, float],
+    pathology_scores: dict[str, float],
     patient_context: dict[str, Any],
-) -> str:
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if not key:
-        return ""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return ""
+) -> tuple[str, list[str]]:
+    policy = _spine_narrative_policy()
+    tags: list[str] = []
+    if policy == "off":
+        return "", ["CT-spine-narrative-disabled"]
 
-    model = (
-        os.environ.get("KIMI_SPINE_MODEL", "").strip()
-        or os.environ.get("KIMI_MODEL", "moonshot-v1-8k").strip()
-    )
-    base = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
+    scores = {
+        "stenosis_severity": float(pathology_scores.get("stenosis_severity", 0) or 0),
+        "disc_degeneration_score": float(pathology_scores.get("disc_degeneration_score", 0) or 0),
+        "cord_compression_confidence": float(pathology_scores.get("cord_compression_confidence", 0) or 0),
+        "pott_disease_confidence": float(pathology_scores.get("pott_disease_confidence", 0) or 0),
+        "fracture_confidence": float(pathology_scores.get("fracture_confidence", 0) or 0),
+    }
     age = patient_context.get("age", "")
     sex = patient_context.get("sex", "")
     clin = patient_context.get("clinical_history", patient_context.get("history", ""))
     hosp = patient_context.get("hospital", "India")
-
     user_text = f"""Spine MRI Analysis Results:
 Vertebral levels assessed: {structures.get('vertebral_levels_assessed')}
 Disc heights: {structures.get('disc_heights')}
@@ -320,99 +314,26 @@ Reporting centre: {hosp}
 Generate a structured spine MRI report following the system prompt.
 Include: disc pathology by level, cord status, Pott's assessment,
 India-specific differentials (TB spine vs other), management."""
-
-    try:
-        client = OpenAI(api_key=key, base_url=base)
-        r = client.chat.completions.create(
-            model=model,
-            max_tokens=2000,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a senior neuroradiologist writing structured spine MRI/CT reports "
-                        "for Indian clinical settings. Be precise; flag uncertainty where input is limited."
-                    ),
-                },
-                {"role": "user", "content": user_text},
-            ],
-        )
-        return (r.choices[0].message.content or "").strip()
-    except Exception as e:
-        logger.warning("Kimi spine narrative failed: %s", e)
-        return ""
-
-
-def _call_claude_spine_narrative(
-    structures: dict[str, Any],
-    scores: dict[str, float],
-    patient_context: dict[str, Any],
-    claude_client: Any,
-) -> str:
-    if claude_client is None:
-        return ""
-    age = patient_context.get("age", "")
-    sex = patient_context.get("sex", "")
-    clin = patient_context.get("clinical_history", patient_context.get("history", ""))
-    body = (
-        f"Spine imaging summary (AI-assisted metrics):\n{json.dumps(structures, indent=2)}\n"
-        f"Scores: {json.dumps(scores, indent=2)}\n"
-        f"Patient: {age}y {sex}\nClinical: {clin}\n"
-        "Write a concise structured neuroradiology report (findings + impression)."
+    system = (
+        "You are a senior neuroradiologist writing structured spine MRI/CT reports "
+        "for Indian clinical settings. Be precise; flag uncertainty where input is limited."
     )
     try:
-        msg = claude_client.messages.create(
-            model=CLAUDE_MODEL,
+        from llm_router import llm_router
+
+        out = llm_router.complete_for_role(
+            "spine",
+            system,
+            user_text,
             max_tokens=2000,
-            system=(
-                "You are a senior neuroradiologist. Output a structured spine MRI/CT report "
-                "for Indian practice (TB endemicity, RNTCP context when Pott's suspected)."
-            ),
-            messages=[{"role": "user", "content": body}],
         )
-        return msg.content[0].text.strip()
+        txt = (out.get("content") or "").strip()
+        if txt:
+            tags.append("OpenRouter-narrative-Spine")
+            return txt, tags
     except Exception as e:
-        logger.warning("Claude spine narrative failed: %s", e)
-        return f"[Narrative unavailable: {e}]"
-
-
-def _spine_narrative_kimi_then_claude(
-    structures: dict[str, Any],
-    pathology_scores: dict[str, float],
-    patient_context: dict[str, Any],
-    claude_client: Any,
-) -> tuple[str, list[str]]:
-    policy = _spine_narrative_policy()
-    tags: list[str] = []
-    if policy in ("off", "none", "disabled", "0"):
-        return "", ["CT-spine-narrative-disabled"]
-
-    scores = {
-        "stenosis_severity": float(pathology_scores.get("stenosis_severity", 0) or 0),
-        "disc_degeneration_score": float(pathology_scores.get("disc_degeneration_score", 0) or 0),
-        "cord_compression_confidence": float(pathology_scores.get("cord_compression_confidence", 0) or 0),
-        "pott_disease_confidence": float(pathology_scores.get("pott_disease_confidence", 0) or 0),
-        "fracture_confidence": float(pathology_scores.get("fracture_confidence", 0) or 0),
-    }
-
-    if policy == "anthropic_only":
-        claude_text = _call_claude_spine_narrative(structures, scores, patient_context, claude_client)
-        if claude_text and not claude_text.startswith("[Narrative unavailable"):
-            tags.append("Claude-narrative-Spine")
-        return claude_text, tags
-
-    kimi_text = _call_kimi_spine_narrative(structures, scores, patient_context)
-    if kimi_text:
-        tags.append("Kimi-narrative-Spine")
-        return kimi_text, tags
-
-    if policy == "kimi_only":
-        return "", tags
-
-    claude_text = _call_claude_spine_narrative(structures, scores, patient_context, claude_client)
-    if claude_text and not claude_text.startswith("[Narrative unavailable"):
-        tags.append("Claude-narrative-Spine")
-    return claude_text, tags
+        logger.warning("OpenRouter spine narrative failed: %s", e)
+    return "", tags
 
 
 def is_loaded() -> dict:
@@ -589,19 +510,10 @@ def run_pipeline(
         **clinical_struct,
     }
 
-    if claude_client is None and os.environ.get("ANTHROPIC_API_KEY"):
-        try:
-            import anthropic
-
-            claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        except Exception:
-            claude_client = None
-
-    narrative, narr_tags = _spine_narrative_kimi_then_claude(
+    narrative, narr_tags = _spine_narrative_openrouter(
         {k: structures_payload[k] for k in clinical_struct},
         merged_scores,
         pctx,
-        claude_client,
     )
     structures_payload["narrative_report"] = narrative
     structures_payload["narrative_policy"] = _spine_narrative_policy()

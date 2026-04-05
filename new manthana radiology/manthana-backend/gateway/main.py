@@ -12,6 +12,7 @@ Central entry point. Routes requests by modality → individual services.
 Handles JWT authentication and file upload.
 """
 
+import asyncio
 import uuid
 import time
 import shutil
@@ -102,6 +103,9 @@ MODEL_DISPLAY_NAMES = {
     # Dermatology
     "EfficientNet-B4-derm": "Manthana Derm Engine",
     "claude-vision-derm": "Manthana Derm Engine",
+    "openrouter-vision-derm-scores": "Manthana Derm Engine",
+    "openrouter_vision_v1": "Manthana Derm Engine",
+    "kimi_k2.5_vision_v1": "Manthana Derm Engine",
     "claude-sonnet-4-20250514": "Manthana Intelligence Core",
     # Ultrasound / mammo
     "XZheng0427/OpenUS": "Manthana Ultrasound Engine",
@@ -134,8 +138,11 @@ MODEL_DISPLAY_NAMES = {
     "CT-Brain-TorchScript-MissingOrFailed": "Manthana Neuro CT Engine",
     "Kimi-narrative-CT-Brain": "Manthana Report AI",
     "Anthropic-narrative-CT-Brain": "Manthana Report AI",
+    "OpenRouter-narrative-CT-Brain": "Manthana Report AI",
     "Kimi-narrative-MRI": "Manthana Report AI",
     "Anthropic-narrative-MRI": "Manthana Report AI",
+    "OpenRouter-narrative-MRI": "Manthana Report AI",
+    "openrouter-vision-oral": "Manthana Oral Intelligence",
     # Generic fallback
     "Demo-Model": "Manthana AI Engine",
 }
@@ -644,8 +651,9 @@ async def copilot(
     request: CopilotRequest,
     token_data: dict = Depends(verify_token),
 ):
-    import os, json
-    from openai import OpenAI
+    import json
+
+    from llm_router import llm_router
 
     modality = request.context.get("modality", "unknown")
     findings = request.context.get("findings", [])
@@ -667,60 +675,33 @@ If the question is outside radiology scope, say so clearly.
 End with: "Clinical correlation and radiologist verification required."
 """
 
-    # Kimi primary
-    kimi_key = os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY", "")
-    kimi_base = os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1")
-    kimi_model = os.getenv("KIMI_MODEL", "kimi-k2.5")
+    def _sync() -> tuple[str, str]:
+        r = llm_router.complete(
+            prompt=request.question,
+            system_prompt=system_prompt,
+            task_type="copilot",
+            max_tokens=1024,
+            temperature=0.3,
+        )
+        return (r.get("content") or "").strip(), str(r.get("model_used", "openrouter"))
 
-    if kimi_key:
-        try:
-            client = OpenAI(api_key=kimi_key, base_url=kimi_base)
-            resp = client.chat.completions.create(
-                model=kimi_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": request.question},
-                ],
-                max_tokens=1024,
-                temperature=0.3,
-            )
-            content = resp.choices[0].message.content or ""
-            return CopilotResponse(
-                response=content.strip(),
-                model_used=_obfuscate_model_names([kimi_model])[0],
-            )
-        except Exception:
-            # Fall through to Groq
-            pass
+    try:
+        content, model_used = await asyncio.to_thread(_sync)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CoPilot LLM unavailable: {exc!s}",
+        ) from exc
 
-    # Groq fallback
-    groq_key = os.getenv("GROQ_API_KEY", "")
-    groq_base = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    if not content:
+        raise HTTPException(
+            status_code=503,
+            detail="CoPilot service temporarily unavailable. Set OPENROUTER_API_KEY.",
+        )
 
-    if groq_key:
-        try:
-            client = OpenAI(api_key=groq_key, base_url=groq_base)
-            resp = client.chat.completions.create(
-                model=groq_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": request.question},
-                ],
-                max_tokens=1024,
-                temperature=0.3,
-            )
-            content = resp.choices[0].message.content or ""
-            return CopilotResponse(
-                response=content.strip(),
-                model_used=_obfuscate_model_names([groq_model])[0],
-            )
-        except Exception:
-            pass
-
-    raise HTTPException(
-        status_code=503,
-        detail="CoPilot service temporarily unavailable. No LLM keys configured.",
+    return CopilotResponse(
+        response=content,
+        model_used=_obfuscate_model_names([model_used])[0],
     )
 
 

@@ -1,57 +1,64 @@
 #!/usr/bin/env python3
-"""Section 6 smoke test: Kimi spine / Pott's narrative (run when API is not rate-limited).
+"""Section 6 smoke test: spine / Pott's narrative via OpenRouter (role spine, SSOT config/cloud_inference.yaml).
 
-Uses KIMI_BASE_URL from api-keys.env (typically https://api.moonshot.ai/v1).
-If you use https://api.moonshot.cn/v1, ensure your key is issued for that region.
+Requires OPENROUTER_API_KEY. Optional: CLOUD_INFERENCE_CONFIG_PATH to repo root YAML.
 """
 from __future__ import annotations
 
 import os
 import sys
 
-_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-_ENV = "/teamspace/studios/this_studio/api-keys.env"
+_BACKEND = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+_SHARED = os.path.join(_BACKEND, "shared")
+_REPO_ROOT = os.path.normpath(os.path.join(_BACKEND, "..", ".."))
 
 
-def _load_env() -> None:
-    path = _ENV if os.path.isfile(_ENV) else os.path.join(_ROOT, "..", "..", "api-keys.env")
-    path = os.path.normpath(path)
-    if not os.path.isfile(path):
-        return
-    for line in open(path, encoding="utf-8"):
-        line = line.strip()
-        if "=" in line and not line.startswith("#"):
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k, v)
+def _load_env_file() -> None:
+    for path in (
+        os.path.join(_REPO_ROOT, "api-keys.env"),
+        os.path.join(_BACKEND, ".env"),
+    ):
+        path = os.path.normpath(path)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
 
 
 def main() -> int:
-    _load_env()
+    _load_env_file()
+    if not (os.environ.get("OPENROUTER_API_KEY") or "").strip():
+        print("Set OPENROUTER_API_KEY", file=sys.stderr)
+        return 1
+    if not os.environ.get("CLOUD_INFERENCE_CONFIG_PATH"):
+        yaml_path = os.path.join(_REPO_ROOT, "config", "cloud_inference.yaml")
+        if os.path.isfile(yaml_path):
+            os.environ["CLOUD_INFERENCE_CONFIG_PATH"] = yaml_path
+
+    if _SHARED not in sys.path:
+        sys.path.insert(0, _SHARED)
+
     try:
-        from openai import OpenAI
-    except ImportError:
-        print("openai package required", file=sys.stderr)
+        from llm_router import llm_router
+    except Exception as e:
+        print(f"llm_router import failed: {e}", file=sys.stderr)
         return 1
 
-    base = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1")
-    kimi = OpenAI(api_key=os.environ["KIMI_API_KEY"], base_url=base)
-    model = os.environ.get("KIMI_SPINE_MODEL", os.environ.get("KIMI_MODEL", "moonshot-v1-8k"))
-    r = kimi.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "Senior neuroradiologist."},
-            {
-                "role": "user",
-                "content": (
-                    "Pott's disease L2-L3, paravertebral abscess, 35M Bihar. "
-                    "200 word structured report with RNTCP protocol. "
-                    "Explicitly recommend CT-guided biopsy for AFB."
-                ),
-            },
-        ],
+    out = llm_router.complete_for_role(
+        "spine",
+        "You are a senior neuroradiologist.",
+        (
+            "Pott's disease L2-L3, paravertebral abscess, 35M Bihar. "
+            "200 word structured report with RNTCP protocol. "
+            "Explicitly recommend CT-guided biopsy for AFB."
+        ),
         max_tokens=4096,
     )
-    text = (r.choices[0].message.content or "").strip()
+    text = (out.get("content") or "").strip()
     print(text)
     required = ["Pott", "L2", "L3", "abscess", "biopsy", "TB", "RNTCP"]
     missing = [t for t in required if t.lower() not in text.lower()]

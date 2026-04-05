@@ -45,7 +45,6 @@ except ImportError:
 logger = logging.getLogger("manthana.mammography")
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "mammography_system.txt"
-CLAUDE_MODEL = os.environ.get("CLAUDE_MAMMOGRAPHY_MODEL", "claude-sonnet-4-5")
 DEVICE = os.environ.get("DEVICE", "cpu")
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/models"))
 MIRAI_CACHE = MODEL_DIR / "mirai_cache"
@@ -59,10 +58,6 @@ DISCLAIMER = (
 )
 
 VIEW_KEYS = frozenset({"L-CC", "L-MLO", "R-CC", "R-MLO"})
-
-KIMI_MAMMO_MODEL = os.environ.get("KIMI_MAMMO_MODEL", "").strip() or os.environ.get(
-    "KIMI_MODEL", "moonshot-v1-8k"
-).strip()
 
 # Mirai model card: 5-year risk thresholds (percent)
 _mirai_model: Any = None
@@ -502,26 +497,32 @@ def _heuristic_mammo_from_path(filepath: str) -> Tuple[Dict[str, Any], Dict[str,
         return _default_mammo_structures_scores()
 
 
-def _call_kimi_mammo_narrative(
+def _mammo_narrative_openrouter(
     structures: Dict[str, Any],
-    scores: Dict[str, float],
+    pathology_scores: Dict[str, float],
     patient_context: Dict[str, Any],
-) -> str:
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if not key:
-        return ""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return ""
-
-    base = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
+    mirai_scores: Dict[str, Any],
+    image_b64: str,
+    has_four_views: bool,
+) -> Tuple[str, List[str]]:
+    tags: List[str] = []
+    scores = {k: float(pathology_scores.get(k, 0) or 0) for k in (
+        "malignancy_confidence",
+        "mass_confidence",
+        "calcification_confidence",
+        "birads_4_or_above",
+        "density_score",
+    )}
     age = patient_context.get("age", "")
     sex = patient_context.get("sex", "")
     clin = patient_context.get("clinical_history", patient_context.get("history", ""))
     fam = patient_context.get("family_history", "unknown")
     hosp = patient_context.get("hospital", "India")
-
+    mirai_block = json.dumps(
+        {"mirai_risk_scores": mirai_scores, "has_four_views": has_four_views},
+        indent=2,
+        default=str,
+    )[:8000]
     user_text = f"""Mammography Analysis Results:
 View: {structures.get('view')}
 Breast density: {structures.get('breast_density')}
@@ -542,64 +543,49 @@ Clinical: {clin}
 Family history: {fam}
 Hospital: {hosp}
 
+MIRAI / CONTEXT:
+{mirai_block}
+
 Generate a structured BI-RADS mammography report.
 Include: ACR density classification, full lesion descriptors,
 BI-RADS category with reasoning, India-specific context
 (Kidwai/Tata Memorial/NRGCP if relevant), recommended action."""
-
     try:
-        client = OpenAI(api_key=key, base_url=base)
-        r = client.chat.completions.create(
-            model=KIMI_MAMMO_MODEL,
-            max_tokens=2000,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a senior breast radiologist writing BI-RADS structured reports "
-                        "for Indian hospitals."
-                    ),
-                },
-                {"role": "user", "content": user_text},
-            ],
+        system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        system_prompt = (
+            "You are a senior breast radiologist writing BI-RADS structured reports for Indian hospitals."
         )
-        return (r.choices[0].message.content or "").strip()
+    try:
+        from llm_router import llm_router
+
+        mime = _sniff_media_type(image_b64) if image_b64 else "image/jpeg"
+        if image_b64:
+            out = llm_router.complete_for_role(
+                "mammography",
+                system_prompt,
+                user_text,
+                image_b64=image_b64,
+                image_mime=mime,
+                max_tokens=2000,
+            )
+            txt = (out.get("content") or "").strip()
+            if txt:
+                tags.append("OpenRouter-narrative-Mammo")
+                return txt, tags
+        out = llm_router.complete_for_role(
+            "mammography",
+            system_prompt,
+            user_text,
+            max_tokens=2000,
+        )
+        txt = (out.get("content") or "").strip()
+        if txt:
+            tags.append("OpenRouter-narrative-Mammo")
+            return txt, tags
     except Exception as e:
-        logger.warning("Kimi mammo narrative failed: %s", e)
-        return ""
-
-
-def _mammo_narrative_kimi_then_claude(
-    structures: Dict[str, Any],
-    pathology_scores: Dict[str, float],
-    patient_context: Dict[str, Any],
-    mirai_scores: Dict[str, Any],
-    image_b64: str,
-    claude_client: Any,
-    has_four_views: bool,
-) -> Tuple[str, List[str]]:
-    tags: List[str] = []
-    scores = {k: float(pathology_scores.get(k, 0) or 0) for k in (
-        "malignancy_confidence",
-        "mass_confidence",
-        "calcification_confidence",
-        "birads_4_or_above",
-        "density_score",
-    )}
-    kimi_text = _call_kimi_mammo_narrative(structures, scores, patient_context)
-    if kimi_text:
-        tags.append("Kimi-narrative-Mammo")
-        return kimi_text, tags
-    claude_text = _call_claude_narrative(
-        mirai_scores=mirai_scores,
-        patient_context=patient_context,
-        image_b64=image_b64,
-        claude_client=claude_client,
-        has_four_views=has_four_views,
-    )
-    if claude_text and not claude_text.startswith("[Narrative unavailable"):
-        tags.append("Claude-narrative-Mammo")
-    return claude_text, tags
+        logger.warning("OpenRouter mammo narrative failed: %s", e)
+    return "", tags
 
 
 def _safe_scores(raw: Dict[str, Any]) -> Dict[str, float]:
@@ -625,59 +611,6 @@ def _sniff_media_type(b64: str) -> str:
     if h[:4] == b"\x89PNG":
         return "image/png"
     return "image/jpeg"
-
-
-def _call_claude_narrative(
-    mirai_scores: Dict[str, Any],
-    patient_context: Dict[str, Any],
-    image_b64: str,
-    claude_client: Any,
-    has_four_views: bool,
-) -> str:
-    if claude_client is None or not image_b64:
-        return ""
-    if not PROMPT_PATH.is_file():
-        return ""
-    try:
-        system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-        measurements = json.dumps(
-            {
-                "mirai_risk_scores": mirai_scores,
-                "has_four_views": has_four_views,
-                "patient_context": patient_context,
-            },
-            indent=2,
-        )
-        msg = claude_client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=2000,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": _sniff_media_type(image_b64),
-                                "data": image_b64,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                f"QUANTITATIVE MEASUREMENTS:\n{measurements}\n\n"
-                                "Generate the mammography report."
-                            ),
-                        },
-                    ],
-                }
-            ],
-        )
-        return msg.content[0].text
-    except Exception as e:
-        return f"[Narrative unavailable: {e}]"
 
 
 def _apply_mirai_to_birads(
@@ -744,13 +677,12 @@ def run_pipeline(
             }
         )
 
-    narrative, narr_tags = _mammo_narrative_kimi_then_claude(
+    narrative, narr_tags = _mammo_narrative_openrouter(
         structures=h_struct,
         pathology_scores=scores_raw,
         patient_context=patient_context,
         mirai_scores=mirai_scores,
         image_b64=image_b64,
-        claude_client=claude_client,
         has_four_views=has_four_views,
     )
     h_struct["narrative_report"] = narrative
@@ -795,12 +727,8 @@ def run_pipeline(
     if mirai_scores.get("available"):
         models_used.append("Mirai")
     models_used.append("heuristic_birads_cv")
-    if "Kimi-narrative-Mammo" in narr_tags:
-        models_used.append(KIMI_MAMMO_MODEL)
-    elif "Claude-narrative-Mammo" in narr_tags:
-        models_used.append(CLAUDE_MODEL)
-    elif narrative and not narrative.startswith("[Narrative unavailable"):
-        models_used.append(CLAUDE_MODEL)
+    if "OpenRouter-narrative-Mammo" in narr_tags:
+        models_used.append("OpenRouter-mammography")
 
     return {
         "modality": "mammography",
@@ -843,15 +771,10 @@ def run_mammography_pipeline_b64(
         f.write(raw)
         tmp = f.name
     try:
-        if claude_client is None and os.environ.get("ANTHROPIC_API_KEY"):
-            import anthropic
-
-            claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         return run_pipeline(
             filepath=tmp,
             job_id="",
             patient_context=patient_context,
-            claude_client=claude_client,
             image_b64=image_b64,
         )
     finally:

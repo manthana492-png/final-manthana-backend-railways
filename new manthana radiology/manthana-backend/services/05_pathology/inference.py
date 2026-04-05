@@ -1,4 +1,4 @@
-"""Manthana — Pathology Inference: Virchow tile embeddings → DSMIL → Kimi / Claude narrative."""
+"""Manthana — Pathology Inference: Virchow tile embeddings → DSMIL → OpenRouter narrative."""
 from __future__ import annotations
 
 import base64
@@ -47,7 +47,6 @@ logger = logging.getLogger("manthana.pathology")
 virchow_model = LazyModel(model_id="paige-ai/Virchow", cache_name="virchow", device="cuda")
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "pathology_system.txt"
-CLAUDE_MODEL = os.environ.get("CLAUDE_PATHOLOGY_MODEL", "claude-sonnet-4-20250514")
 
 
 def is_loaded() -> bool:
@@ -146,22 +145,27 @@ def _sniff_media_type(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-def _call_claude_narrative_only(
+def _pathology_narrative_openrouter(
     dsmil_scores: dict[str, Any],
     structures: dict[str, Any],
     patient_context: dict[str, Any],
+    pathology_scores: dict[str, float],
     image_b64: str,
-    claude_client: Any,
-    findings_summary: str,
-) -> str:
-    if claude_client is None:
-        return ""
+    findings: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    tags: list[str] = []
+    findings_summary = "; ".join(
+        f"{f.get('label', '')} ({f.get('severity', '')})" for f in findings[:12]
+    )
+    if not findings_summary:
+        findings_summary = "No structured findings."
     try:
         system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    except OSError as e:
-        logger.warning("Prompt read failed: %s", e)
-        return ""
-
+    except OSError:
+        system_prompt = "You are an expert histopathology assistant."
+    age = patient_context.get("age", "")
+    sex = patient_context.get("sex", "")
+    clin = patient_context.get("clinical_history", patient_context.get("history", ""))
     measurements = json.dumps(
         {
             "dsmil_scores": dsmil_scores,
@@ -173,71 +177,6 @@ def _call_claude_narrative_only(
         indent=2,
         ensure_ascii=False,
     )
-
-    try:
-        msg = claude_client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=2000,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": _sniff_media_type(base64.b64decode(image_b64)),
-                                "data": image_b64,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "QUANTITATIVE MEASUREMENTS:\n"
-                                f"{measurements}\n\n"
-                                "Generate a structured histopathology-style narrative for clinician review."
-                            ),
-                        },
-                    ],
-                }
-            ],
-        )
-        return msg.content[0].text
-    except Exception as e:
-        logger.warning("Claude narrative failed: %s", e)
-        return f"[Narrative unavailable: {e}]"
-
-
-def _call_kimi_pathology_narrative(
-    dsmil_scores: dict[str, Any],
-    structures: dict[str, Any],
-    patient_context: dict[str, Any],
-    scores: dict[str, float],
-    findings_summary: str,
-) -> str:
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if not key:
-        return ""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return ""
-
-    try:
-        system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    except OSError:
-        system_prompt = "You are an expert histopathology assistant."
-
-    model = (
-        os.environ.get("KIMI_PATHOLOGY_MODEL", "").strip()
-        or os.environ.get("KIMI_MODEL", "moonshot-v1-8k").strip()
-    )
-    base = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-    age = patient_context.get("age", "")
-    sex = patient_context.get("sex", "")
-    clin = patient_context.get("clinical_history", patient_context.get("history", ""))
-
     user_text = f"""Pathology Analysis Results:
 Tissue type: {structures.get('tissue_type')}
 Stain: {structures.get('stain', 'H&E')}
@@ -245,10 +184,10 @@ Tile count: {structures.get('tile_count')}
 Model: {structures.get('model_name', 'Virchow')}
 
 Pathology scores:
-  Malignancy confidence: {scores.get('malignancy_confidence', 0):.3f}
-  Tumor percentage: {scores.get('tumor_percentage', 0):.3f}
-  Necrosis fraction: {scores.get('necrosis_fraction', 0):.3f}
-  Mitotic count per mm2: {scores.get('mitotic_count_per_mm2', 0):.1f}
+  Malignancy confidence: {pathology_scores.get('malignancy_confidence', 0):.3f}
+  Tumor percentage: {pathology_scores.get('tumor_percentage', 0):.3f}
+  Necrosis fraction: {pathology_scores.get('necrosis_fraction', 0):.3f}
+  Mitotic count per mm2: {pathology_scores.get('mitotic_count_per_mm2', 0):.1f}
 
 Findings:
   {findings_summary}
@@ -256,64 +195,43 @@ Findings:
 Patient: {age}y {sex}
 History: {clin}
 
+QUANTITATIVE:
+{measurements}
+
 Generate a pathology report following the system prompt format.
 Include WHO grade, mitotic rate, necrosis extent,
 resection margins if applicable, and management recommendation."""
-
     try:
-        client = OpenAI(api_key=key, base_url=base)
-        r = client.chat.completions.create(
-            model=model,
+        from llm_router import llm_router
+
+        mime = _sniff_media_type(base64.b64decode(image_b64)) if image_b64 else "image/jpeg"
+        if image_b64:
+            out = llm_router.complete_for_role(
+                "vision_pathology",
+                system_prompt,
+                user_text,
+                image_b64=image_b64,
+                image_mime=mime,
+                max_tokens=2000,
+            )
+            txt = (out.get("content") or "").strip()
+            if txt:
+                tags.append("OpenRouter-narrative-Pathology")
+                return txt, tags
+        out = llm_router.complete_for_role(
+            "vision_pathology",
+            system_prompt,
+            user_text,
             max_tokens=2000,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
         )
-        return (r.choices[0].message.content or "").strip()
+        txt = (out.get("content") or "").strip()
+        if txt:
+            tags.append("OpenRouter-narrative-Pathology")
+            return txt, tags
     except Exception as e:
-        logger.warning("Kimi pathology narrative failed: %s", e)
-        return ""
-
-
-def _pathology_narrative_kimi_then_claude(
-    dsmil_scores: dict[str, Any],
-    structures: dict[str, Any],
-    patient_context: dict[str, Any],
-    pathology_scores: dict[str, float],
-    image_b64: str,
-    claude_client: Any,
-    findings: list[dict[str, Any]],
-) -> tuple[str, list[str]]:
-    tags: list[str] = []
-    findings_summary = "; ".join(
-        f"{f.get('label', '')} ({f.get('severity', '')})" for f in findings[:12]
-    )
-    if not findings_summary:
-        findings_summary = "No structured findings."
-
-    kimi_text = _call_kimi_pathology_narrative(
-        dsmil_scores,
-        structures,
-        patient_context,
-        pathology_scores,
-        findings_summary,
-    )
-    if kimi_text:
-        tags.append("Kimi-narrative-Pathology")
-        return kimi_text, tags
-
-    claude_text = _call_claude_narrative_only(
-        dsmil_scores,
-        structures,
-        patient_context,
-        image_b64,
-        claude_client,
-        findings_summary,
-    )
-    if claude_text and not claude_text.startswith("[Narrative unavailable"):
-        tags.append("Claude-narrative-Pathology")
-    return claude_text, tags
+        logger.warning("OpenRouter pathology narrative failed: %s", e)
+        return f"[Narrative unavailable: {e}]", tags
+    return "", tags
 
 
 def run_pipeline(
@@ -367,21 +285,12 @@ def run_pipeline(
         except OSError:
             image_b64 = ""
 
-    if claude_client is None and os.environ.get("ANTHROPIC_API_KEY") and image_b64:
-        try:
-            import anthropic
-
-            claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        except Exception as e:
-            logger.debug("Anthropic client not created: %s", e)
-
-    narrative, narr_tags = _pathology_narrative_kimi_then_claude(
+    narrative, narr_tags = _pathology_narrative_openrouter(
         dsmil_scores=dsmil_result,
         structures=structures,
         patient_context=patient_context,
         pathology_scores=pathology_scores,
         image_b64=image_b64,
-        claude_client=claude_client,
         findings=findings,
     )
     structures["narrative_report"] = narrative

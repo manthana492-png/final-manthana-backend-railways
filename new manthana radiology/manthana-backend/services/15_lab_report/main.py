@@ -1,6 +1,6 @@
 """
 Manthana — Lab Report Analysis Service
-Interprets PDF/text lab reports using Kimi K2.5 + optional Parrotlet VLM.
+Interprets PDF/text lab reports using OpenRouter + optional Parrotlet VLM.
 
 Input: multipart file or JSON { document_b64, patient_context_json }
 Output: Structured findings with E2E enrichment (test_results, patterns, narrative).
@@ -57,14 +57,17 @@ def _finalize_lab_api_response(result: dict, job_id: str, start: float) -> dict:
 
 @app.get("/health")
 async def health():
-    kimi_ok = bool(
-        (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY", "")).strip()
-    )
+    or_ok = False
+    for name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"):
+        k = (os.environ.get(name) or "").strip()
+        if k and len(k) >= 8:
+            or_ok = True
+            break
     return {
         "service": SERVICE_NAME,
-        "status": "ok" if kimi_ok else "no_api_key",
-        "models_loaded": kimi_ok,
-        "llm": "kimi-k2.5",
+        "status": "ok" if or_ok else "no_api_key",
+        "models_loaded": or_ok,
+        "llm": "openrouter",
         "gpu_available": False,
         "version": "1.0.0",
     }

@@ -8,7 +8,7 @@ Usage:
 
 Requires:
   - PYTHONPATH including shared/ and services/01_body_xray/
-  - KIMI_API_KEY (or MOONSHOT_API_KEY) configured for narrative generation
+  - OPENROUTER_API_KEY configured for narrative generation (see config/cloud_inference.yaml)
   - GPU optional (CPU works; slower)
 
 Loads api-keys.env from this_studio if present (same search as inference: walk parents, then known workspace path).

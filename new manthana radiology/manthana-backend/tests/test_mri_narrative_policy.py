@@ -39,11 +39,10 @@ def test_mri_narrative_policy_off_returns_empty(brain_mri_inference, monkeypatch
     assert tags == []
 
 
-def test_mri_narrative_anthropic_only_skips_kimi_without_key(brain_mri_inference, monkeypatch):
-    monkeypatch.setenv("MRI_NARRATIVE_POLICY", "anthropic_only")
-    monkeypatch.delenv("KIMI_API_KEY", raising=False)
-    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_mri_narrative_openrouter_without_key_returns_empty(brain_mri_inference, monkeypatch):
+    monkeypatch.setenv("MRI_NARRATIVE_POLICY", "openrouter")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_2", raising=False)
     from pathlib import Path
 
     inf = brain_mri_inference

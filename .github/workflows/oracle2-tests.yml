@@ -1,0 +1,48 @@
+# Runs from monorepo root (this_studio). Nested oracle-2/.github is not used by GitHub Actions.
+name: Oracle-2 CI - Tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "oracle-2/**"
+      - "packages/manthana-inference/**"
+      - "config/cloud_inference.yaml"
+      - ".github/workflows/oracle2-tests.yml"
+  pull_request:
+    paths:
+      - "oracle-2/**"
+      - "packages/manthana-inference/**"
+      - "config/cloud_inference.yaml"
+      - ".github/workflows/oracle2-tests.yml"
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oracle-2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ../packages/manthana-inference
+          pip install -r requirements.txt
+
+      - name: Run test suite
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CLOUD_INFERENCE_CONFIG_PATH: ${{ github.workspace }}/config/cloud_inference.yaml
+          LITELLM_MASTER_KEY: "test-litellm-key"
+        run: |
+          PYTHONPATH=. pytest tests/ -m "not integration" -v --tb=short --cov=api --cov=orchestrator --cov=plagiarism_service --cov=services/shared --cov=services/ai-router --cov-report=term-missing --cov-fail-under=55

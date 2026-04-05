@@ -1,43 +1,30 @@
 """
-Manthana — Intelligent LLM Router
-Primary: Google Gemini 2.0 Flash Lite (direct REST).
-If Gemini fails: Groq (default llama-3.3-70b-versatile — on Groq free tier), then DeepSeek V3, then Kimi.
-
-Usage:
-    from llm_router import llm_router
-    response = llm_router.complete(prompt="...", system_prompt="...", task_type="lab_report")
+Manthana — OpenRouter-only LLM router (SSOT: ../../config/cloud_inference.yaml).
 """
 
-import os
+from __future__ import annotations
+
 import json
 import logging
-from typing import Optional, Dict, Any, Callable, List, Tuple
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger("manthana.llm_router")
 
+# Repo root: manthana-backend/shared/llm_router.py -> parents[3] = this_studio
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_MI_SRC = _REPO_ROOT / "packages" / "manthana-inference" / "src"
+if str(_MI_SRC) not in sys.path:
+    sys.path.insert(0, str(_MI_SRC))
 
-def _valid_gemini_key(key: str) -> bool:
-    if not key or len(key) < 30:
-        return False
-    kl = key.lower()
-    if "your-" in kl or kl.startswith("aiza-placeholder"):
-        return False
-    return key.startswith("AIza")
-
-
-def _valid_sk_key(key: str) -> bool:
-    if not key or key in ("", "sk-xxx", "sk-placeholder"):
-        return False
-    if "your-" in key.lower():
-        return False
-    return True
-
-
-class ModelType:
-    GEMINI = "gemini"
-    DEEPSEEK = "deepseek"
-    KIMI = "kimi"
-    GROQ = "groq"
+from manthana_inference import (  # type: ignore  # noqa: E402
+    build_openrouter_sync_client,
+    chat_complete_sync,
+    load_cloud_inference_config,
+    resolve_role,
+)
 
 
 class TaskType:
@@ -46,63 +33,48 @@ class TaskType:
     CLINICAL_QA = "clinical_qa"
     SUMMARIZATION = "summarization"
     CORRELATION = "correlation"
+    COPILOT = "copilot"
     FALLBACK = "fallback"
 
 
+_TASK_TO_ROLE = {
+    TaskType.LAB_REPORT: "lab_report",
+    TaskType.UNIFIED_REPORT: "unified_report",
+    TaskType.CLINICAL_QA: "clinical_qa",
+    TaskType.SUMMARIZATION: "summarization",
+    TaskType.CORRELATION: "correlation",
+    TaskType.COPILOT: "copilot",
+    TaskType.FALLBACK: "fallback",
+}
+
+
+def _openrouter_keys() -> List[str]:
+    keys: List[str] = []
+    for env_name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"):
+        k = (os.environ.get(env_name) or "").strip()
+        if k and len(k) >= 8 and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def _load_cfg():
+    path = (os.environ.get("CLOUD_INFERENCE_CONFIG_PATH") or "").strip()
+    return load_cloud_inference_config(Path(path) if path else (_REPO_ROOT / "config" / "cloud_inference.yaml"))
+
+
 class LLMRouter:
-    """
-    Primary: Gemini 2.0 Flash Lite (GEMINI_MODEL, default gemini-2.0-flash-lite).
-    Fallback chain: Groq (GROQ_MODEL, default llama-3.3-70b-versatile) → DeepSeek V3 → Kimi.
-    """
+    """Routes all text completions through OpenRouter using YAML roles."""
 
-    def __init__(self):
-        self.strategy = os.getenv("LLM_ROUTING_STRATEGY", "smart")
+    def __init__(self) -> None:
+        self.strategy = os.getenv("LLM_ROUTING_STRATEGY", "openrouter")
 
-        self.config = {
-            ModelType.GEMINI: {
-                "api_key": os.getenv("GEMINI_API_KEY", ""),
-                "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite"),
-                "context_window": 1000000,
-                "strengths": ["fast", "multimodal-ready", "cost", "json"],
-            },
-            ModelType.DEEPSEEK: {
-                "api_key": os.getenv("DEEPSEEK_API_KEY", ""),
-                "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-                "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-                "context_window": 64000,
-                "strengths": ["json", "structured", "fallback"],
-            },
-            ModelType.KIMI: {
-                "api_key": os.getenv("KIMI_API_KEY", ""),
-                "base_url": os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1"),
-                "model": os.getenv("KIMI_MODEL", "kimi-k2.5"),
-                "context_window": 256000,
-                "strengths": ["long_context", "synthesis"],
-            },
-            ModelType.GROQ: {
-                "api_key": os.getenv("GROQ_API_KEY", ""),
-                "base_url": os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-                "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                "context_window": 128000,
-                "strengths": ["speed"],
-            },
-        }
-
-        self.available_models = self._check_availability()
-
-        logger.info("LLM Router: strategy=%s available=%s", self.strategy, self.available_models)
-
-    def _check_availability(self) -> List[str]:
-        out: List[str] = []
-        if _valid_gemini_key(self.config[ModelType.GEMINI]["api_key"]):
-            out.append(ModelType.GEMINI)
-        if _valid_sk_key(self.config[ModelType.DEEPSEEK]["api_key"]):
-            out.append(ModelType.DEEPSEEK)
-        if _valid_sk_key(self.config[ModelType.KIMI]["api_key"]):
-            out.append(ModelType.KIMI)
-        if _valid_sk_key(self.config[ModelType.GROQ]["api_key"]):
-            out.append(ModelType.GROQ)
-        return out
+    @staticmethod
+    def _build_messages(system_prompt: str, prompt: str) -> List[Dict[str, str]]:
+        msgs: List[Dict[str, str]] = []
+        if system_prompt and system_prompt.strip():
+            msgs.append({"role": "system", "content": system_prompt})
+        msgs.append({"role": "user", "content": prompt})
+        return msgs
 
     def complete(
         self,
@@ -114,186 +86,133 @@ class LLMRouter:
         requires_json: bool = False,
         force_model: Optional[str] = None,
     ) -> Dict[str, Any]:
+        _ = force_model  # reserved — models come from cloud_inference.yaml
+        keys = _openrouter_keys()
+        if not keys:
+            raise ValueError(
+                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
+            )
+        cfg = _load_cfg()
+        role = _TASK_TO_ROLE.get(task_type)
+        if role is None:
+            role = task_type if task_type in cfg.roles else "narrative_default"
+        rc = resolve_role(cfg, role)
+        rc = rc.model_copy(update={"temperature": temperature, "max_tokens": max_tokens})
         messages = self._build_messages(system_prompt, prompt)
-
-        if force_model:
-            fm = force_model.lower().strip()
-            if fm == "gemini" and ModelType.GEMINI in self.available_models:
-                return self._call_gemini(self.config[ModelType.GEMINI], messages, temperature, max_tokens)
-            if fm == "deepseek" and ModelType.DEEPSEEK in self.available_models:
-                return self._call_deepseek(self.config[ModelType.DEEPSEEK], messages, temperature, max_tokens)
-            if fm == "kimi" and ModelType.KIMI in self.available_models:
-                return self._call_kimi(self.config[ModelType.KIMI], messages, temperature, max_tokens)
-            if fm == "groq" and ModelType.GROQ in self.available_models:
-                return self._call_groq(self.config[ModelType.GROQ], messages, temperature, max_tokens)
-
-        # Default chain: Gemini → Groq (fast free-tier fallback) → DeepSeek → Kimi
-        chain: List[Tuple[str, Callable]] = []
-        if ModelType.GEMINI in self.available_models:
-            chain.append(
-                (ModelType.GEMINI, lambda: self._call_gemini(self.config[ModelType.GEMINI], messages, temperature, max_tokens))
-            )
-        if ModelType.GROQ in self.available_models:
-            chain.append(
-                (ModelType.GROQ, lambda: self._call_groq(self.config[ModelType.GROQ], messages, temperature, max_tokens))
-            )
-        if ModelType.DEEPSEEK in self.available_models:
-            chain.append(
-                (ModelType.DEEPSEEK, lambda: self._call_deepseek(self.config[ModelType.DEEPSEEK], messages, temperature, max_tokens))
-            )
-        if ModelType.KIMI in self.available_models:
-            chain.append(
-                (ModelType.KIMI, lambda: self._call_kimi(self.config[ModelType.KIMI], messages, temperature, max_tokens))
-            )
-
-        if not chain:
-            raise ValueError("No LLM providers configured. Set GEMINI_API_KEY, GROQ_API_KEY, and/or DEEPSEEK_API_KEY in .env")
-
+        fmt = {"type": "json_object"} if requires_json else None
         last_err: Optional[Exception] = None
-        for name, fn in chain:
+        for api_key in keys:
             try:
-                return fn()
+                client = build_openrouter_sync_client(api_key, cfg)
+                text, model_used = chat_complete_sync(
+                    client,
+                    cfg,
+                    role,
+                    list(messages),
+                    role_cfg=rc,
+                    response_format=fmt,
+                )
+                return {
+                    "content": text,
+                    "model_used": model_used,
+                    "usage": {},
+                    "finish_reason": "stop",
+                }
             except Exception as e:
                 last_err = e
-                logger.warning("LLM %s failed: %s", name, e)
+                logger.warning("OpenRouter attempt failed: %s", e)
+        raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
 
-        raise RuntimeError(f"All LLM providers failed. Last error: {last_err}")
+    def complete_for_role(
+        self,
+        role: str,
+        system_prompt: str,
+        user_text: str,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        requires_json: bool = False,
+        image_b64: Optional[str] = None,
+        image_mime: str = "image/jpeg",
+    ) -> Dict[str, Any]:
+        """
+        Text or vision completion for an arbitrary SSOT role (e.g. narrative_mri, vision_primary).
+        """
+        keys = _openrouter_keys()
+        if not keys:
+            raise ValueError(
+                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
+            )
+        cfg = _load_cfg()
+        rc = resolve_role(cfg, role)
+        upd: Dict[str, Any] = {}
+        if temperature is not None:
+            upd["temperature"] = temperature
+        if max_tokens is not None:
+            upd["max_tokens"] = max_tokens
+        if upd:
+            rc = rc.model_copy(update=upd)
 
-    @staticmethod
-    def _build_messages(system_prompt: str, prompt: str) -> List[Dict[str, str]]:
-        msgs = []
-        if system_prompt and system_prompt.strip():
-            msgs.append({"role": "system", "content": system_prompt})
-        msgs.append({"role": "user", "content": prompt})
-        return msgs
+        sys_c = (system_prompt or "")[:200000]
+        user_c = user_text[:200000]
+        user_content: Union[str, List[Dict[str, Any]]]
+        if image_b64 and image_b64.strip():
+            url = f"data:{image_mime};base64,{image_b64.strip()}"
+            user_content = [
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "text", "text": user_c},
+            ]
+        else:
+            user_content = user_c
 
-    def _call_gemini(self, config: dict, messages: list, temperature: float, max_tokens: int) -> dict:
-        """Google Generative Language API — Gemini 2.0 Flash Lite (direct)."""
-        import httpx
+        messages: List[Dict[str, Any]] = []
+        if sys_c.strip():
+            messages.append({"role": "system", "content": sys_c})
+        messages.append({"role": "user", "content": user_content})
 
-        system = ""
-        user_texts = []
-        for m in messages:
-            if m["role"] == "system":
-                system = m["content"]
-            else:
-                user_texts.append(m["content"])
-        user = "\n\n".join(user_texts)
-        combined = f"{system}\n\n{user}" if system.strip() else user
-
-        model = config["model"]
-        api_key = config["api_key"]
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": combined}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-            },
-        }
-
-        with httpx.Client(timeout=120.0) as client:
-            r = client.post(f"{url}?key={api_key}", json=payload)
-            r.raise_for_status()
-            data = r.json()
-
-        cand = data.get("candidates") or [{}]
-        parts = (cand[0].get("content") or {}).get("parts") or []
-        text = parts[0].get("text", "") if parts else ""
-        if not text and data.get("promptFeedback", {}).get("blockReason"):
-            raise RuntimeError(f"Gemini blocked: {data['promptFeedback']}")
-
-        usage = data.get("usageMetadata") or {}
-        return {
-            "content": text,
-            "model_used": "gemini-2.0-flash-lite",
-            "usage": {
-                "prompt_tokens": usage.get("promptTokenCount", 0),
-                "completion_tokens": usage.get("candidatesTokenCount", 0),
-                "total_tokens": usage.get("totalTokenCount", 0),
-            },
-            "finish_reason": "stop",
-        }
-
-    def _call_deepseek(self, config: dict, messages: list, temperature: float, max_tokens: int) -> dict:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
-        response = client.chat.completions.create(
-            model=config["model"],
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        u = response.usage
-        return {
-            "content": response.choices[0].message.content,
-            "model_used": "deepseek-v3",
-            "usage": {
-                "prompt_tokens": u.prompt_tokens if u else 0,
-                "completion_tokens": u.completion_tokens if u else 0,
-                "total_tokens": u.total_tokens if u else 0,
-            },
-            "finish_reason": response.choices[0].finish_reason,
-        }
-
-    def _call_kimi(self, config: dict, messages: list, temperature: float, max_tokens: int) -> dict:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
-        response = client.chat.completions.create(
-            model=config["model"],
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        u = response.usage
-        return {
-            "content": response.choices[0].message.content,
-            "model_used": "kimi-2.5",
-            "usage": {
-                "prompt_tokens": u.prompt_tokens if u else 0,
-                "completion_tokens": u.completion_tokens if u else 0,
-                "total_tokens": u.total_tokens if u else 0,
-            },
-            "finish_reason": response.choices[0].finish_reason,
-        }
-
-    def _call_groq(self, config: dict, messages: list, temperature: float, max_tokens: int) -> dict:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
-        response = client.chat.completions.create(
-            model=config["model"],
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        u = response.usage
-        mid = config.get("model", "llama-3.3-70b-versatile")
-        return {
-            "content": response.choices[0].message.content,
-            "model_used": f"groq:{mid}",
-            "usage": {
-                "prompt_tokens": u.prompt_tokens if u else 0,
-                "completion_tokens": u.completion_tokens if u else 0,
-                "total_tokens": u.total_tokens if u else 0,
-            },
-            "finish_reason": response.choices[0].finish_reason,
-        }
+        fmt: Optional[Dict[str, Any]] = {"type": "json_object"} if requires_json else None
+        last_err: Optional[Exception] = None
+        for api_key in keys:
+            try:
+                client = build_openrouter_sync_client(api_key, cfg)
+                text, model_used = chat_complete_sync(
+                    client,
+                    cfg,
+                    role,
+                    list(messages),
+                    role_cfg=rc,
+                    response_format=fmt,
+                )
+                return {
+                    "content": text,
+                    "model_used": model_used,
+                    "usage": {},
+                    "finish_reason": "stop",
+                }
+            except Exception as e:
+                last_err = e
+                logger.warning("OpenRouter role=%s attempt failed: %s", role, e)
+        raise RuntimeError(f"All OpenRouter keys failed for role {role!r}. Last error: {last_err}")
 
     def get_model_info(self) -> dict:
         return {
             "strategy": self.strategy,
-            "primary": "gemini-2.0-flash-lite",
-            "fallback_after_gemini": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            "then": ["deepseek-v3", "kimi"],
-            "available_models": self.available_models,
+            "provider": "openrouter",
+            "config": str(_REPO_ROOT / "config" / "cloud_inference.yaml"),
         }
 
 
 llm_router = LLMRouter()
+
+
+def complete_for_role(
+    role: str,
+    system_prompt: str,
+    user_text: str,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Module-level helper for modality services."""
+    return llm_router.complete_for_role(role, system_prompt, user_text, **kwargs)
 
 
 def analyze_lab_report(structured_data: dict, raw_text: str) -> dict:

@@ -90,6 +90,9 @@ services:
       - XRAY_MODEL_IDLE_UNLOAD_SEC=${XRAY_MODEL_IDLE_UNLOAD_SEC:-180}
       - XRAY_UNLOAD_MODE=${XRAY_UNLOAD_MODE:-gpu_only}
       - XRAY_MODEL_IDLE_CHECK_SEC=${XRAY_MODEL_IDLE_CHECK_SEC:-15}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes: [upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
     depends_on: {redis: {condition: service_healthy}}
     networks: [manthana]
@@ -99,6 +102,11 @@ services:
     build: ./services/report_assembly
     ports: ["${PORT_REPORT:-8020}:8020"]
     env_file: .env
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
+    volumes: [./shared:/app/shared, model_cache:/models]
     networks: [manthana]
     restart: unless-stopped
 
@@ -129,8 +137,10 @@ services:
     env_file: .env
     environment:
       - DEVICE=cpu
-      - XRAY_REQUIRE_KIMI_NARRATIVE=${XRAY_REQUIRE_KIMI_NARRATIVE:-1}
-      - KIMI_MODEL=${KIMI_MODEL:-kimi-k2.5}
+      - XRAY_REQUIRE_LLM_NARRATIVE=${XRAY_REQUIRE_LLM_NARRATIVE:-1}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
       - XRAY_MODEL_IDLE_UNLOAD_SEC=${XRAY_MODEL_IDLE_UNLOAD_SEC:-180}
       - XRAY_UNLOAD_MODE=${XRAY_UNLOAD_MODE:-gpu_only}
       - XRAY_MODEL_IDLE_CHECK_SEC=${XRAY_MODEL_IDLE_CHECK_SEC:-15}
@@ -144,7 +154,10 @@ services:
     env_file: .env
     environment:
       - DEVICE=cpu
-      - MRI_NARRATIVE_POLICY=${MRI_NARRATIVE_POLICY:-kimi_then_anthropic}
+      - MRI_NARRATIVE_POLICY=${MRI_NARRATIVE_POLICY:-openrouter}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
       - MRI_NARRATIVE_VISION=${MRI_NARRATIVE_VISION:-1}
       - MAX_UPLOAD_MB_BRAIN_MRI=${MAX_UPLOAD_MB_BRAIN_MRI:-512}
       # Shared TotalSeg idle: CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC / CT_TOTALSEG_IDLE_CHECK_SEC
@@ -167,8 +180,9 @@ services:
     env_file: .env
     environment:
       - DEVICE=cpu
-      - CLAUDE_PATHOLOGY_MODEL=${CLAUDE_PATHOLOGY_MODEL:-claude-sonnet-4-20250514}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
     networks: [manthana]
     restart: unless-stopped
@@ -187,7 +201,10 @@ services:
     ports: ["${PORT_CT_BRAIN:-8017}:8017"]
     env_file: .env
     environment:
-      - CT_BRAIN_NARRATIVE_POLICY=${CT_BRAIN_NARRATIVE_POLICY:-kimi_then_anthropic}
+      - CT_BRAIN_NARRATIVE_POLICY=${CT_BRAIN_NARRATIVE_POLICY:-openrouter}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
       - CT_BRAIN_TORCHSCRIPT_PATH=${CT_BRAIN_TORCHSCRIPT_PATH:-}
       - CT_BRAIN_CRITICAL_THRESHOLD=${CT_BRAIN_CRITICAL_THRESHOLD:-0.5}
       - CT_BRAIN_DEVICE=cpu
@@ -222,8 +239,9 @@ services:
     env_file: .env
     environment:
       - DEVICE=cpu
-      - CLAUDE_CYTOLOGY_MODEL=${CLAUDE_CYTOLOGY_MODEL:-claude-sonnet-4-20250514}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
     networks: [manthana]
     restart: unless-stopped
@@ -234,8 +252,9 @@ services:
     env_file: .env
     environment:
       - DEVICE=cpu
-      - CLAUDE_MAMMOGRAPHY_MODEL=${CLAUDE_MAMMOGRAPHY_MODEL:-claude-sonnet-4-5}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
       - HF_TOKEN=${HF_TOKEN}
       - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}
     volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
@@ -282,7 +301,9 @@ services:
     environment:
       - DEVICE=cpu
       - MODEL_DIR=/models
-      - CLAUDE_DERMATOLOGY_MODEL=${CLAUDE_DERMATOLOGY_MODEL:-claude-sonnet-4-20250514}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
+      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8016/health')"]

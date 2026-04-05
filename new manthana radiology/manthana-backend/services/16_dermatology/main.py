@@ -1,5 +1,5 @@
 """
-Manthana — Dermatology service (Kimi K2.5 vision + DermAI system prompt + optional V2 weights).
+Manthana — Dermatology service (OpenRouter vision + DermAI system prompt + optional V2 weights).
 """
 
 from __future__ import annotations
@@ -34,14 +34,14 @@ async def health():
 
 @app.get("/ready")
 async def ready():
-    """Readiness: requires Kimi (Moonshot) API key."""
+    """Readiness: requires OpenRouter API key and DermAI prompt file."""
     st = get_ready()
     if not st.get("ready"):
         raise HTTPException(
             status_code=503,
             detail=(
-                "Service not ready: set KIMI_API_KEY or MOONSHOT_API_KEY, "
-                "and ensure prompts/dermatology_dermai_system.txt is present in the image."
+                "Service not ready: set OPENROUTER_API_KEY and ensure "
+                "prompts/dermatology_dermai_system.txt is present in the image."
             ),
         )
     return st

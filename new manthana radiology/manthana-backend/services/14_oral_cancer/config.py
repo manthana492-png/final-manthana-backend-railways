@@ -19,17 +19,5 @@ EFFNET_V2M_CHECKPOINT = os.getenv(
 UNI_MODEL_ID = os.getenv("UNI_MODEL_ID", "MahmoodLab/UNI")
 UNI_HEAD_CHECKPOINT = os.getenv("UNI_HEAD_CHECKPOINT", "uni_oral_linear_head.pt")
 
-# Vision LLM fallback (clinical interpretation when no local classifier succeeds)
-CLAUDE_ORAL_MODEL = os.getenv("CLAUDE_ORAL_MODEL", "claude-sonnet-4-20250514")
-
-# Kimi / narrative — same resolution order as other modalities
-KIMI_ORAL_CANCER_MODEL = (
-    os.getenv("KIMI_ORAL_CANCER_MODEL")
-    or os.getenv("KIMI_ORAL_MODEL")
-    or os.getenv("KIMI_MODEL", "moonshot-v1-8k")
-).strip()
-
-# Long-form screening report (Kimi → Anthropic); separate from vision JSON model
-ANTHROPIC_ORAL_NARRATIVE_MODEL = os.getenv(
-    "ANTHROPIC_ORAL_NARRATIVE_MODEL", "claude-3-5-sonnet-20241022"
-).strip()
+# Cloud LLM (vision JSON + long-form narrative): OpenRouter only — models from config/cloud_inference.yaml (role oral_cancer).
+# Set OPENROUTER_API_KEY (and optionally CLOUD_INFERENCE_CONFIG_PATH).

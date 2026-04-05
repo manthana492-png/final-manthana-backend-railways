@@ -36,7 +36,10 @@ _ci_dummy_module: Any = None
 
 
 def _narrative_policy() -> str:
-    return os.environ.get("CT_BRAIN_NARRATIVE_POLICY", "kimi_then_anthropic").strip().lower()
+    v = (os.environ.get("CT_BRAIN_NARRATIVE_POLICY", "openrouter") or "openrouter").strip().lower()
+    if v in ("off", "none", "disabled", "0"):
+        return "off"
+    return "openrouter"
 
 
 def _critical_threshold() -> float:
@@ -139,31 +142,6 @@ def _run_torchscript(t: Any) -> float | None:
     return None
 
 
-def _anthropic_narrative(system: str, user_text: str) -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key:
-        return ""
-    try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=key)
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-        msg = client.messages.create(
-            model=model,
-            max_tokens=1200,
-            system=system[:20000],
-            messages=[{"role": "user", "content": user_text[:120000]}],
-        )
-        block = msg.content[0]
-        return getattr(block, "text", str(block)).strip()
-    except ImportError:
-        logger.warning("anthropic not installed; skip CT brain narrative")
-        return ""
-    except Exception as e:
-        logger.warning("CT brain Anthropic narrative failed: %s", e)
-        return ""
-
-
 def _call_ct_brain_narrative(
     *,
     impression: str,
@@ -171,10 +149,8 @@ def _call_ct_brain_narrative(
     pathology_scores: dict,
     patient_context: dict | None,
 ) -> tuple[str, list[str]]:
-    policy = _narrative_policy()
-    tags: list[str] = []
-    if policy in ("off", "none", "disabled", "0"):
-        return "", tags
+    if _narrative_policy() == "off":
+        return "", []
 
     system = (
         "You are a neuroradiologist assistant. Write a concise NCCT brain report-style narrative "
@@ -189,43 +165,21 @@ def _call_ct_brain_narrative(
         f"CT_BRAIN_CLINICAL:\n{json.dumps((patient_context or {}).get('ct_brain_clinical_context') or {}, indent=2)[:2000]}"
     )
 
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if key and policy in ("kimi_then_anthropic", "kimi_only"):
-        try:
-            from openai import OpenAI
-        except ImportError:
-            logger.warning("openai not installed; skip CT brain Kimi narrative")
-        else:
-            base_url = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-            model = (
-                os.environ.get("KIMI_CT_MODEL", "").strip()
-                or os.environ.get("KIMI_MODEL", "kimi-k2.5").strip()
-            )
-            try:
-                client = OpenAI(api_key=key, base_url=base_url)
-                r = client.chat.completions.create(
-                    model=model,
-                    max_tokens=1200,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_text},
-                    ],
-                )
-                out = (r.choices[0].message.content or "").strip()
-                if out:
-                    tags.append("Kimi-narrative-CT-Brain")
-                    return out, tags
-            except Exception as e:
-                logger.warning("CT brain Kimi narrative failed: %s", e)
+    try:
+        from llm_router import llm_router
 
-    if policy == "kimi_only":
-        return "", tags
-
-    ant = _anthropic_narrative(system, user_text)
-    if ant:
-        tags.append("Anthropic-narrative-CT-Brain")
-        return ant, tags
-    return "", tags
+        out = llm_router.complete_for_role(
+            "narrative_ct",
+            system,
+            user_text,
+            max_tokens=1200,
+        )
+        txt = (out.get("content") or "").strip()
+        if txt:
+            return txt, ["OpenRouter-narrative-CT-Brain"]
+    except Exception as e:
+        logger.warning("CT brain OpenRouter narrative failed: %s", e)
+    return "", []
 
 
 def is_loaded() -> dict:

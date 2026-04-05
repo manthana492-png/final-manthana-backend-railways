@@ -1,7 +1,7 @@
 """
 Manthana — ECG Inference Pipeline
 Heuristic rhythm scoring (ecg_rhythm) + neurokit2 intervals. No HuggingFace ecg-fm / HeartLang.
-Optional narrative: Kimi vision/text -> Groq text -> ("", []).
+Optional narrative: OpenRouter vision/text (SSOT). Never raises.
 """
 
 import base64
@@ -16,6 +16,10 @@ from typing import Any, List, Optional
 
 import numpy as np
 
+_ecg_dir = Path(__file__).resolve().parent
+_backend_shared = _ecg_dir.parent.parent / "shared"
+if _backend_shared.is_dir():
+    sys.path.insert(0, str(_backend_shared))
 sys.path.insert(0, "/app/shared")
 
 from disclaimer import DISCLAIMER
@@ -34,14 +38,6 @@ from preprocessing.ecg_utils import (
     normalize_ecg,
 )
 from schemas import Finding
-from config import (
-    GROQ_API_KEY,
-    GROQ_BASE_URL,
-    GROQ_MODEL,
-    KIMI_API_KEY,
-    KIMI_BASE_URL,
-    KIMI_ECG_MODEL,
-)
 
 logger = logging.getLogger("manthana.ecg")
 
@@ -210,94 +206,58 @@ def _call_ecg_narrative(
     structures: Optional[dict] = None,
     prompt_path: Optional[Path] = None,
 ) -> tuple[str, list[str]]:
-    """
-    Kimi vision (image+text) -> Kimi text -> Groq text -> ("", []).
-    Never raises.
-    """
+    """OpenRouter: narrative_ecg role (vision if digitized image, else text). Never raises."""
     tags: list[str] = []
     system = _read_ecg_system_prompt(prompt_path)
     text_payload = _build_ecg_text_payload(
         rhythm_scores, intervals, emergency_flags, patient_context, structures
     )
 
-    if KIMI_API_KEY and image_b64:
+    try:
+        from llm_router import llm_router
+    except Exception as exc:
+        logger.warning("ECG narrative: llm_router unavailable: %s", exc)
+        return "", []
+
+    if image_b64:
         try:
             from PIL import Image as _PIL
-            from openai import OpenAI
 
             raw = base64.b64decode(image_b64)
             img = _PIL.open(io.BytesIO(raw)).convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85)
             jpeg_b64 = base64.b64encode(buf.getvalue()).decode()
-
-            client = OpenAI(api_key=KIMI_API_KEY, base_url=KIMI_BASE_URL)
-            r = client.chat.completions.create(
-                model=KIMI_ECG_MODEL,
+            out = llm_router.complete_for_role(
+                "narrative_ecg",
+                system[:20000],
+                text_payload[:120000],
+                image_b64=jpeg_b64,
+                image_mime="image/jpeg",
                 max_tokens=1200,
-                temperature=1,
-                messages=[
-                    {"role": "system", "content": system[:20000]},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{jpeg_b64}"},
-                            },
-                            {"type": "text", "text": text_payload[:120000]},
-                        ],
-                    },
-                ],
-            )
-            out = (r.choices[0].message.content or "").strip()
-            if out:
-                tags.append("Kimi-vision-ECG")
-                return out, tags
-        except Exception as e:
-            logger.warning("Kimi vision ECG failed: %s", e)
-
-    if KIMI_API_KEY:
-        try:
-            from openai import OpenAI
-
-            client = OpenAI(api_key=KIMI_API_KEY, base_url=KIMI_BASE_URL)
-            r = client.chat.completions.create(
-                model=KIMI_ECG_MODEL,
-                max_tokens=1200,
-                temperature=1,
-                messages=[
-                    {"role": "system", "content": system[:20000]},
-                    {"role": "user", "content": text_payload[:120000]},
-                ],
-            )
-            out = (r.choices[0].message.content or "").strip()
-            if out:
-                tags.append("Kimi-text-ECG")
-                return out, tags
-        except Exception as e:
-            logger.warning("Kimi text ECG failed: %s", e)
-
-    if GROQ_API_KEY:
-        try:
-            from openai import OpenAI
-
-            client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
-            r = client.chat.completions.create(
-                model=GROQ_MODEL,
-                max_tokens=1000,
                 temperature=0.2,
-                messages=[
-                    {"role": "system", "content": system[:20000]},
-                    {"role": "user", "content": text_payload[:120000]},
-                ],
             )
-            out = (r.choices[0].message.content or "").strip()
-            if out:
-                tags.append("Groq-ECG")
-                return out, tags
+            txt = (out.get("content") or "").strip()
+            if txt:
+                tags.append("OpenRouter-vision-ECG")
+                return txt, tags
         except Exception as e:
-            logger.warning("Groq ECG failed: %s", e)
+            logger.warning("OpenRouter vision ECG failed: %s", e)
+
+    try:
+        out = llm_router.complete_for_role(
+            "narrative_ecg",
+            system[:20000],
+            text_payload[:120000],
+            max_tokens=1200,
+            temperature=0.2,
+        )
+        txt = (out.get("content") or "").strip()
+        if txt:
+            tags.append("OpenRouter-text-ECG")
+            return txt, tags
+    except Exception as e:
+        logger.warning("OpenRouter text ECG failed: %s", e)
 
     return "", []
 

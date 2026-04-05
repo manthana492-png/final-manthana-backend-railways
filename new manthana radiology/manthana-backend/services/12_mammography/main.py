@@ -1,4 +1,5 @@
-"""Manthana — Mammography Service: Mirai (4-view) + optional Claude narrative"""
+"""Manthana — Mammography Service: Mirai (4-view) + OpenRouter narrative (SSOT: config/cloud_inference.yaml)."""
+
 import json
 import os
 import sys
@@ -56,18 +57,12 @@ async def analyze(
         except json.JSONDecodeError:
             patient_context = {}
 
-    claude_client = None
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        import anthropic
-
-        claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
     try:
         result = run_pipeline(
             filepath=fp,
             job_id=job_id,
             patient_context=patient_context,
-            claude_client=claude_client,
+            claude_client=None,
             image_b64="",
         )
     except Exception as e:

@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+src/manthana_inference/__init__.py
+src/manthana_inference/__main__.py
+src/manthana_inference/client.py
+src/manthana_inference/loader.py
+src/manthana_inference/schema.py
+src/manthana_inference.egg-info/PKG-INFO
+src/manthana_inference.egg-info/SOURCES.txt
+src/manthana_inference.egg-info/dependency_links.txt
+src/manthana_inference.egg-info/requires.txt
+src/manthana_inference.egg-info/top_level.txt

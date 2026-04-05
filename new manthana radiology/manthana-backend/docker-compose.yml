@@ -57,6 +57,9 @@ services:
       XRAY_MODEL_IDLE_UNLOAD_SEC: ${XRAY_MODEL_IDLE_UNLOAD_SEC:-180}
       XRAY_UNLOAD_MODE: ${XRAY_UNLOAD_MODE:-gpu_only}
       XRAY_MODEL_IDLE_CHECK_SEC: ${XRAY_MODEL_IDLE_CHECK_SEC:-15}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes:
       - upload_data:/tmp/manthana_uploads
       - model_cache:/models
@@ -136,6 +139,9 @@ services:
     env_file: .env
     environment:
       MODEL_DIR: /models
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes:
       - model_cache:/models
       - ./shared:/app/shared
@@ -182,8 +188,10 @@ services:
       - "${PORT_BODY_XRAY:-8001}:8001"
     env_file: .env
     environment:
-      XRAY_REQUIRE_KIMI_NARRATIVE: ${XRAY_REQUIRE_KIMI_NARRATIVE:-1}
-      KIMI_MODEL: ${KIMI_MODEL:-kimi-k2.5}
+      XRAY_REQUIRE_LLM_NARRATIVE: ${XRAY_REQUIRE_LLM_NARRATIVE:-1}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
       XRAY_MODEL_IDLE_UNLOAD_SEC: ${XRAY_MODEL_IDLE_UNLOAD_SEC:-180}
       XRAY_UNLOAD_MODE: ${XRAY_UNLOAD_MODE:-gpu_only}
       XRAY_MODEL_IDLE_CHECK_SEC: ${XRAY_MODEL_IDLE_CHECK_SEC:-15}
@@ -209,8 +217,11 @@ services:
     env_file: .env
     environment:
       MONAI_DATA_DIRECTORY: /models/monai
-      MRI_NARRATIVE_POLICY: ${MRI_NARRATIVE_POLICY:-kimi_then_anthropic}
+      MRI_NARRATIVE_POLICY: ${MRI_NARRATIVE_POLICY:-openrouter}
       MRI_NARRATIVE_VISION: ${MRI_NARRATIVE_VISION:-1}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
       MAX_UPLOAD_MB_BRAIN_MRI: ${MAX_UPLOAD_MB_BRAIN_MRI:-512}
     volumes:
       - model_cache:/models
@@ -233,8 +244,9 @@ services:
       - "${PORT_PATHOLOGY:-8005}:8005"
     env_file: .env
     environment:
-      - CLAUDE_PATHOLOGY_MODEL=${CLAUDE_PATHOLOGY_MODEL:-claude-sonnet-4-20250514}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes:
       - model_cache:/models
       - upload_data:/tmp/manthana_uploads
@@ -256,8 +268,9 @@ services:
       - "${PORT_CYTOLOGY:-8011}:8011"
     env_file: .env
     environment:
-      - CLAUDE_CYTOLOGY_MODEL=${CLAUDE_CYTOLOGY_MODEL:-claude-sonnet-4-20250514}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes:
       - model_cache:/models
       - upload_data:/tmp/manthana_uploads
@@ -279,7 +292,10 @@ services:
       - "${PORT_SPINE_NEURO:-8010}:8010"
     env_file: .env
     environment:
-      CT_SPINE_NARRATIVE_POLICY: ${CT_SPINE_NARRATIVE_POLICY:-kimi_then_anthropic}
+      CT_SPINE_NARRATIVE_POLICY: ${CT_SPINE_NARRATIVE_POLICY:-openrouter}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
       CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC: ${CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC:-0}
       CT_TOTALSEG_IDLE_CHECK_SEC: ${CT_TOTALSEG_IDLE_CHECK_SEC:-30}
     volumes:
@@ -308,7 +324,10 @@ services:
     env_file: .env
     environment:
       MONAI_DATA_DIRECTORY: /models/monai
-      CT_ABDOMINAL_NARRATIVE_POLICY: ${CT_ABDOMINAL_NARRATIVE_POLICY:-kimi_then_anthropic}
+      CT_ABDOMINAL_NARRATIVE_POLICY: ${CT_ABDOMINAL_NARRATIVE_POLICY:-openrouter}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
       CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC: ${CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC:-0}
       CT_TOTALSEG_IDLE_CHECK_SEC: ${CT_TOTALSEG_IDLE_CHECK_SEC:-30}
     volumes:
@@ -334,6 +353,9 @@ services:
     environment:
       MONAI_DATA_DIRECTORY: /models/monai
       CT_CARDIAC_NARRATIVE_POLICY: ${CT_CARDIAC_NARRATIVE_POLICY:-off}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
       CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC: ${CT_TOTALSEG_IDLE_EMPTY_CACHE_SEC:-0}
       CT_TOTALSEG_IDLE_CHECK_SEC: ${CT_TOTALSEG_IDLE_CHECK_SEC:-30}
     volumes:
@@ -357,7 +379,10 @@ services:
       - "${PORT_CT_BRAIN:-8017}:8017"
     env_file: .env
     environment:
-      CT_BRAIN_NARRATIVE_POLICY: ${CT_BRAIN_NARRATIVE_POLICY:-kimi_then_anthropic}
+      CT_BRAIN_NARRATIVE_POLICY: ${CT_BRAIN_NARRATIVE_POLICY:-openrouter}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
       CT_BRAIN_TORCHSCRIPT_PATH: ${CT_BRAIN_TORCHSCRIPT_PATH:-}
       CT_BRAIN_CRITICAL_THRESHOLD: ${CT_BRAIN_CRITICAL_THRESHOLD:-0.5}
       CT_BRAIN_DEVICE: ${CT_BRAIN_DEVICE:-cuda}
@@ -378,6 +403,12 @@ services:
     networks:
       - manthana
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8017/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   ultrasound:
     build: ./services/09_ultrasound
@@ -405,10 +436,11 @@ services:
       - "${PORT_MAMMOGRAPHY:-8012}:8012"
     env_file: .env
     environment:
-      - CLAUDE_MAMMOGRAPHY_MODEL=${CLAUDE_MAMMOGRAPHY_MODEL:-claude-sonnet-4-5}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - HF_TOKEN=${HF_TOKEN}
-      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
+      HF_TOKEN: ${HF_TOKEN}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN}
     volumes:
       - model_cache:/models
       - upload_data:/tmp/manthana_uploads
@@ -487,18 +519,13 @@ services:
       - "${PORT_DERMATOLOGY:-8016}:8016"
     env_file: .env
     environment:
-      - DEVICE=${DERM_DEVICE:-cpu}
-      - MODEL_DIR=/models
-      - KIMI_API_KEY=${KIMI_API_KEY}
-      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY}
-      - KIMI_BASE_URL=${KIMI_BASE_URL:-https://api.moonshot.ai/v1}
-      - KIMI_MODEL=${KIMI_MODEL:-kimi-k2.5}
-      - KIMI_DERMATOLOGY_MODEL=${KIMI_DERMATOLOGY_MODEL:-kimi-k2.5}
-      - KIMI_DERMATOLOGY_THINKING=${KIMI_DERMATOLOGY_THINKING:-enabled}
-      - KIMI_DERMATOLOGY_TIMEOUT_SEC=${KIMI_DERMATOLOGY_TIMEOUT_SEC:-240}
-      - KIMI_DERMATOLOGY_MAX_RETRIES=${KIMI_DERMATOLOGY_MAX_RETRIES:-2}
-      - DERM_MAX_UPLOAD_BYTES=${DERM_MAX_UPLOAD_BYTES:-15728640}
-      - DERM_MAX_IMAGE_PIXELS=${DERM_MAX_IMAGE_PIXELS:-36000000}
+      DEVICE: ${DERM_DEVICE:-cpu}
+      MODEL_DIR: /models
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
+      DERM_MAX_UPLOAD_BYTES: ${DERM_MAX_UPLOAD_BYTES:-15728640}
+      DERM_MAX_IMAGE_PIXELS: ${DERM_MAX_IMAGE_PIXELS:-36000000}
     volumes:
       - upload_data:/tmp/manthana_uploads
       - ./shared:/app/shared
@@ -509,40 +536,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-    networks:
-      - manthana
-    restart: unless-stopped
-
-  ct_brain:
-    build: ./services/11_ct_brain
-    ports:
-      - "${PORT_CT_BRAIN:-8017}:8017"
-    env_file: .env
-    environment:
-      CT_BRAIN_NARRATIVE_POLICY: ${CT_BRAIN_NARRATIVE_POLICY:-kimi_then_anthropic}
-      CT_BRAIN_TORCHSCRIPT_PATH: ${CT_BRAIN_TORCHSCRIPT_PATH:-}
-      CT_BRAIN_CRITICAL_THRESHOLD: ${CT_BRAIN_CRITICAL_THRESHOLD:-0.5}
-      CT_BRAIN_DEVICE: ${CT_BRAIN_DEVICE:-cuda}
-      CT_BRAIN_CI_DUMMY_MODEL: ${CT_BRAIN_CI_DUMMY_MODEL:-0}
-      CT_BRAIN_GPU_IDLE_EMPTY_CACHE_SEC: ${CT_BRAIN_GPU_IDLE_EMPTY_CACHE_SEC:-0}
-      CT_BRAIN_GPU_IDLE_CHECK_SEC: ${CT_BRAIN_GPU_IDLE_CHECK_SEC:-30}
-    volumes:
-      - model_cache:/models
-      - upload_data:/tmp/manthana_uploads
-      - ./shared:/app/shared
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8017/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     networks:
       - manthana
     restart: unless-stopped

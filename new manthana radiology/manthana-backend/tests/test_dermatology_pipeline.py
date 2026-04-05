@@ -1,4 +1,4 @@
-"""Tests for dermatology critical flags and V1 analyzer (mocked Kimi / OpenAI client)."""
+"""Tests for dermatology critical flags and V1 analyzer (mocked OpenRouter / llm_router)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ import json
 import os
 import sys
 from io import BytesIO
-from unittest.mock import MagicMock
-
 import pytest
 
 _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -115,9 +113,8 @@ def _dummy_jpeg_b64():
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def test_analyze_v1_structure_mocked_kimi(monkeypatch):
-    monkeypatch.setenv("KIMI_API_KEY", "test-key")
-    monkeypatch.setenv("KIMI_DERMATOLOGY_THINKING", "disabled")
+def test_analyze_v1_structure_mocked_openrouter(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-xxxxxxxx")
 
     az = _load_dermatology_analyzer()
 
@@ -133,14 +130,12 @@ def test_analyze_v1_structure_mocked_kimi(monkeypatch):
     })
     narrative_text = "4. IMPRESSION\nTinea corporis likely.\n\n### DIFFERENTIAL"
 
-    mock_resp1 = MagicMock()
-    mock_resp1.choices = [MagicMock(message=MagicMock(content=scores_json))]
-    mock_resp2 = MagicMock()
-    mock_resp2.choices = [MagicMock(message=MagicMock(content=narrative_text))]
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.side_effect = [mock_resp1, mock_resp2]
+    def _fake_openrouter(**kwargs):
+        if kwargs.get("requires_json"):
+            return scores_json, "openai/gpt-4o-mini"
+        return narrative_text, "openai/gpt-4o-mini"
 
-    monkeypatch.setattr(az, "_make_openai_client", lambda *a, **k: mock_client)
+    monkeypatch.setattr(az, "_openrouter_derm_complete", _fake_openrouter)
 
     result = az.analyze_dermatology(
         image_b64=_dummy_jpeg_b64(),
@@ -149,15 +144,14 @@ def test_analyze_v1_structure_mocked_kimi(monkeypatch):
     )
 
     assert result["modality"] == "dermatology"
-    assert result["structures"]["classifier_mode"] == "kimi_k2.5_vision_v1"
+    assert result["structures"]["classifier_mode"] == "openrouter_vision_v1"
     assert result["structures"]["critical"]["is_critical"] is False
     assert isinstance(result["findings"], list)
     assert len(result["findings"]) >= 1
 
 
 def test_malignancy_critical_in_findings(monkeypatch):
-    monkeypatch.setenv("KIMI_API_KEY", "test-key")
-    monkeypatch.setenv("KIMI_DERMATOLOGY_THINKING", "disabled")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-xxxxxxxx")
 
     az = _load_dermatology_analyzer()
 
@@ -177,14 +171,12 @@ def test_malignancy_critical_in_findings(monkeypatch):
     })
     narrative = "⚠️ URGENT DERMATOLOGY REFERRAL REQUIRED\nImpression: SCC suspected."
 
-    mock_r1 = MagicMock()
-    mock_r1.choices = [MagicMock(message=MagicMock(content=malignant_scores))]
-    mock_r2 = MagicMock()
-    mock_r2.choices = [MagicMock(message=MagicMock(content=narrative))]
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.side_effect = [mock_r1, mock_r2]
+    def _fake_openrouter(**kwargs):
+        if kwargs.get("requires_json"):
+            return malignant_scores, "openai/gpt-4o-mini"
+        return narrative, "openai/gpt-4o-mini"
 
-    monkeypatch.setattr(az, "_make_openai_client", lambda *a, **k: mock_client)
+    monkeypatch.setattr(az, "_openrouter_derm_complete", _fake_openrouter)
 
     result = az.analyze_dermatology(
         image_b64=_dummy_jpeg_b64(),

@@ -1,4 +1,4 @@
-"""Manthana — Cytology Inference: Virchow + DSMIL + Kimi / Claude narrative."""
+"""Manthana — Cytology Inference: Virchow + DSMIL + OpenRouter narrative."""
 from __future__ import annotations
 
 import base64
@@ -47,7 +47,6 @@ logger = logging.getLogger("manthana.cytology")
 virchow_model = LazyModel(model_id="paige-ai/Virchow", cache_name="virchow", device="cuda")
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "cytology_system.txt"
-CLAUDE_MODEL = os.environ.get("CLAUDE_CYTOLOGY_MODEL", "claude-sonnet-4-20250514")
 
 BETHESDA_LABELS = ["NILM", "ASCUS", "LSIL", "HSIL", "AGC", "AIS", "malignant"]
 SPUTUM_LABELS = ["normal", "reactive_changes", "suspicious", "malignant", "tb_suggestive"]
@@ -243,94 +242,40 @@ def _sniff_media_type(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-def _call_claude_narrative_only(
+def _cytology_narrative_openrouter(
     cell_result: dict[str, Any],
     structures: dict[str, Any],
     patient_context: dict[str, Any],
+    pathology_scores: dict[str, float],
     image_b64: str,
-    claude_client: Any,
-) -> str:
-    if claude_client is None:
-        return ""
+) -> tuple[str, list[str]]:
+    tags: list[str] = []
     try:
         system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    except OSError as e:
-        logger.warning("Prompt read failed: %s", e)
-        return ""
-
+    except OSError:
+        system_prompt = "You are an expert cytopathology assistant."
+    age = patient_context.get("age", "")
+    sex = patient_context.get("sex", "")
+    clin = patient_context.get("clinical_history", patient_context.get("history", ""))
     measurements = json.dumps(
         {
-            "cytology_scores": {k: v for k, v in cell_result.items()
-                                if k in ("top_class", "confidence", "adequacy", "specimen_type", "bethesda_category")},
+            "cytology_scores": {
+                k: v
+                for k, v in cell_result.items()
+                if k
+                in (
+                    "top_class",
+                    "confidence",
+                    "adequacy",
+                    "specimen_type",
+                    "bethesda_category",
+                )
+            },
             "patient_context": patient_context,
         },
         indent=2,
         ensure_ascii=False,
     )
-
-    try:
-        msg = claude_client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=2000,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": _sniff_media_type(base64.b64decode(image_b64)),
-                                "data": image_b64,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "QUANTITATIVE MEASUREMENTS:\n"
-                                f"{measurements}\n\n"
-                                "Generate a structured cytopathology-style narrative for clinician review."
-                            ),
-                        },
-                    ],
-                }
-            ],
-        )
-        return msg.content[0].text
-    except Exception as e:
-        logger.warning("Claude narrative failed: %s", e)
-        return f"[Narrative unavailable: {e}]"
-
-
-def _call_kimi_cytology_narrative(
-    cell_result: dict[str, Any],
-    structures: dict[str, Any],
-    patient_context: dict[str, Any],
-    scores: dict[str, float],
-) -> str:
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if not key:
-        return ""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return ""
-
-    try:
-        system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    except OSError:
-        system_prompt = "You are an expert cytopathology assistant."
-
-    model = (
-        os.environ.get("KIMI_CYTOLOGY_MODEL", "").strip()
-        or os.environ.get("KIMI_MODEL", "moonshot-v1-8k").strip()
-    )
-    base = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-    age = patient_context.get("age", "")
-    sex = patient_context.get("sex", "")
-    clin = patient_context.get("clinical_history", patient_context.get("history", ""))
-
     user_text = f"""Cytology Analysis Results:
 Specimen type: {structures.get('specimen_type')}
 Bethesda category: {structures.get('bethesda_category')}
@@ -339,54 +284,49 @@ Cell count: {structures.get('cell_count', 0)}
 Atypical cell fraction: {structures.get('atypical_cell_fraction', 0):.3f}
 
 Cytology scores:
-  HSIL confidence: {scores.get('hsil_confidence', 0):.3f}
-  N/C ratio: {scores.get('n_c_ratio', 0):.3f}
-  Nuclear irregularity: {scores.get('nuclear_irregularity', 0):.3f}
+  HSIL confidence: {pathology_scores.get('hsil_confidence', 0):.3f}
+  N/C ratio: {pathology_scores.get('n_c_ratio', 0):.3f}
+  Nuclear irregularity: {pathology_scores.get('nuclear_irregularity', 0):.3f}
 
 Patient: {age}y {sex}
 HPV status: {patient_context.get('hpv_status', 'unknown')}
 History: {clin}
 
+QUANTITATIVE:
+{measurements}
+
 Generate a cytopathology report following the system prompt format."""
-
     try:
-        client = OpenAI(api_key=key, base_url=base)
-        r = client.chat.completions.create(
-            model=model,
+        from llm_router import llm_router
+
+        mime = _sniff_media_type(base64.b64decode(image_b64)) if image_b64 else "image/jpeg"
+        if image_b64:
+            out = llm_router.complete_for_role(
+                "cytology",
+                system_prompt,
+                user_text,
+                image_b64=image_b64,
+                image_mime=mime,
+                max_tokens=2000,
+            )
+            txt = (out.get("content") or "").strip()
+            if txt:
+                tags.append("OpenRouter-narrative-Cytology")
+                return txt, tags
+        out = llm_router.complete_for_role(
+            "cytology",
+            system_prompt,
+            user_text,
             max_tokens=2000,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
         )
-        return (r.choices[0].message.content or "").strip()
+        txt = (out.get("content") or "").strip()
+        if txt:
+            tags.append("OpenRouter-narrative-Cytology")
+            return txt, tags
     except Exception as e:
-        logger.warning("Kimi cytology narrative failed: %s", e)
-        return ""
-
-
-def _cytology_narrative_kimi_then_claude(
-    cell_result: dict[str, Any],
-    structures: dict[str, Any],
-    patient_context: dict[str, Any],
-    pathology_scores: dict[str, float],
-    image_b64: str,
-    claude_client: Any,
-) -> tuple[str, list[str]]:
-    tags: list[str] = []
-    kimi_text = _call_kimi_cytology_narrative(
-        cell_result, structures, patient_context, pathology_scores
-    )
-    if kimi_text:
-        tags.append("Kimi-narrative-Cytology")
-        return kimi_text, tags
-
-    claude_text = _call_claude_narrative_only(
-        cell_result, structures, patient_context, image_b64, claude_client
-    )
-    if claude_text and not claude_text.startswith("[Narrative unavailable"):
-        tags.append("Claude-narrative-Cytology")
-    return claude_text, tags
+        logger.warning("OpenRouter cytology narrative failed: %s", e)
+        return f"[Narrative unavailable: {e}]", tags
+    return "", tags
 
 
 def run_pipeline(
@@ -446,21 +386,12 @@ def run_pipeline(
         except OSError:
             image_b64 = ""
 
-    if claude_client is None and os.environ.get("ANTHROPIC_API_KEY") and image_b64:
-        try:
-            import anthropic
-
-            claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        except Exception as e:
-            logger.debug("Anthropic client not created: %s", e)
-
-    narrative, narr_tags = _cytology_narrative_kimi_then_claude(
+    narrative, narr_tags = _cytology_narrative_openrouter(
         cell_result=cell_result,
         structures=structures,
         patient_context=patient_context,
         pathology_scores=pathology_scores,
         image_b64=image_b64,
-        claude_client=claude_client,
     )
     structures["narrative_report"] = narrative
 

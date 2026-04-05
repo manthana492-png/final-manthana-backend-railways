@@ -1,0 +1,161 @@
+# Manthana cloud inference — single source of truth (OpenRouter)
+# Orchestration: edit `model` / `fallback_models` per role; runtime secret is OPENROUTER_API_KEY (never commit).
+# Default models are sensible OpenRouter slugs — replace with your orchestration choices.
+
+schema_version: "1"
+
+openrouter_base_url: "https://openrouter.ai/api/v1"
+
+# Optional HTTP headers for OpenRouter dashboard attribution (values from env at runtime).
+header_env:
+  HTTP-Referer: OPENROUTER_HTTP_REFERER
+  X-Title: OPENROUTER_APP_TITLE
+
+defaults:
+  max_tokens: 4096
+  temperature: 0.2
+
+roles:
+  # --- oracle-2 stack ---
+  oracle_chat:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 8192
+    temperature: 0.2
+    fallback_models: ["openai/gpt-4o-mini:online"]
+  oracle_m5:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 4096
+    temperature: 0.15
+    fallback_models: ["openai/gpt-4o-mini:online"]
+  ai_router_chat:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.2
+    fallback_models: ["openai/gpt-4o-mini"]
+  ai_router_synthesis:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.15
+    fallback_models: ["openai/gpt-4o-mini"]
+  research_synthesis:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 4096
+    temperature: 0.25
+    fallback_models: ["openai/gpt-4o-mini"]
+  research_planner:
+    model: "meta-llama/llama-3.1-8b-instruct"
+    max_tokens: 512
+    temperature: 0.3
+    fallback_models: ["openai/gpt-4o-mini"]
+  web_knowledge:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 256
+    temperature: 0.3
+    fallback_models: []
+  orchestrator_synthesis:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 1024
+    temperature: 0.1
+    fallback_models: ["openai/gpt-4o-mini"]
+
+  # --- manthana radiology / modality narratives (shared llm_router task types) ---
+  clinical_qa:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: ["openai/gpt-4o-mini"]
+  lab_report:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.1
+    fallback_models: ["openai/gpt-4o-mini"]
+  unified_report:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.15
+    fallback_models: ["openai/gpt-4o-mini"]
+  summarization:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 2048
+    temperature: 0.2
+    fallback_models: []
+  correlation:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 4096
+    temperature: 0.15
+    fallback_models: ["openai/gpt-4o-mini"]
+  narrative_default:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: ["openai/gpt-4o-mini"]
+  narrative_ct:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: ["openai/gpt-4o-mini"]
+  narrative_mri:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: ["openai/gpt-4o-mini"]
+  narrative_usg:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 1200
+    temperature: 0.25
+    fallback_models: ["meta-llama/llama-3.3-70b-instruct"]
+  narrative_ecg:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 1200
+    temperature: 0.2
+    fallback_models: ["openai/gpt-4o-mini"]
+  vision_primary:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: ["anthropic/claude-3.5-sonnet"]
+  vision_pathology:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 8192
+    temperature: 0.1
+    fallback_models: []
+  cytology:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 2000
+    temperature: 0.1
+    fallback_models: ["meta-llama/llama-3.3-70b-instruct"]
+  dermatology:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 4096
+    temperature: 0.15
+    fallback_models: []
+  copilot:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.2
+    fallback_models: ["openai/gpt-4o-mini"]
+  oral_cancer:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: []
+  mammography:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 8192
+    temperature: 0.1
+    fallback_models: []
+  spine:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.1
+    fallback_models: ["openai/gpt-4o-mini"]
+  report_assembly:
+    model: "meta-llama/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.15
+    fallback_models: ["openai/gpt-4o-mini"]
+  fallback:
+    model: "openai/gpt-4o-mini"
+    max_tokens: 4096
+    temperature: 0.2
+    fallback_models: []

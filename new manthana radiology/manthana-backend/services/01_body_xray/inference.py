@@ -2,7 +2,7 @@
 CXR inference entrypoints for HTTP, ZeroClaw, and tests.
 
 TorchXRayVision ensemble lives in pipeline_chest.run_chest_pipeline.
-Optional narrative: Kimi only (vision + scores). Never raises to caller.
+Optional narrative: OpenRouter only (SSOT: config/cloud_inference.yaml). Never raises to caller.
 """
 
 from __future__ import annotations
@@ -47,14 +47,12 @@ def _load_api_keys_env() -> None:
 
 _load_api_keys_env()
 
-KIMI_API_KEY = os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY", "")
-KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1")
-KIMI_MODEL = os.getenv("KIMI_MODEL", "kimi-k2.5")
-XRAY_REQUIRE_KIMI_NARRATIVE = os.getenv("XRAY_REQUIRE_KIMI_NARRATIVE", "1").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-)
+XRAY_REQUIRE_LLM_NARRATIVE = os.getenv(
+    "XRAY_REQUIRE_LLM_NARRATIVE",
+    os.getenv("XRAY_REQUIRE_KIMI_NARRATIVE", "1"),
+).strip().lower() in ("1", "true", "yes")
+# Legacy name (env XRAY_REQUIRE_KIMI_NARRATIVE still supported above); tests may patch this alias.
+XRAY_REQUIRE_KIMI_NARRATIVE = XRAY_REQUIRE_LLM_NARRATIVE
 
 
 def run_pipeline(
@@ -64,7 +62,7 @@ def run_pipeline(
     image_b64: str | None = None,
 ) -> dict:
     """
-    Run chest X-ray analysis. Optional LLM narrative uses Kimi from env.
+    Run chest X-ray analysis. Optional LLM narrative uses OpenRouter from env.
     """
     path = filepath
     if image_b64:
@@ -165,78 +163,11 @@ def _optional_llm_narrative(
     patient_context: dict | None,
     image_b64: str | None = None,
 ) -> str:
-    """
-    Provider order: Kimi (vision if image) → Kimi text.
-    Never raises; returns empty string if all fail.
-    """
+    """OpenRouter vision (if image) then text. Never raises."""
     import json
 
     scores_json = json.dumps(pathology_scores, indent=2)[:12000]
     patient_json = json.dumps(patient_context or {}, indent=2)[:4000]
-
-    kimi_key = (KIMI_API_KEY or "").strip()
-    kimi_url = (KIMI_BASE_URL or "https://api.moonshot.ai/v1").strip()
-    kimi_model = (KIMI_MODEL or "kimi-k2.5").strip()
-
-    if kimi_key:
-        if image_b64:
-            txt = _kimi_openai_narrative(
-                api_key=kimi_key,
-                base_url=kimi_url,
-                model=kimi_model,
-                image_b64=image_b64,
-                scores_json=scores_json,
-                patient_json=patient_json,
-                impression=impression,
-                use_vision=True,
-            )
-            if txt:
-                return txt
-        txt = _kimi_openai_narrative(
-            api_key=kimi_key,
-            base_url=kimi_url,
-            model=kimi_model,
-            image_b64=None,
-            scores_json=scores_json,
-            patient_json=patient_json,
-            impression=impression,
-            use_vision=False,
-        )
-        if txt:
-            return txt
-
-    return ""
-
-
-def _kimi_extra_body(model: str) -> dict | None:
-    """Moonshot Kimi K2.x: optional thinking control (see platform.moonshot.ai K2.5 docs)."""
-    m = model.lower()
-    if "kimi-k2" in m:
-        return {"thinking": {"type": "disabled"}}
-    return None
-
-
-def _kimi_openai_narrative(
-    *,
-    api_key: str,
-    base_url: str,
-    model: str,
-    image_b64: str | None,
-    scores_json: str,
-    patient_json: str,
-    impression: str,
-    use_vision: bool,
-) -> str:
-    try:
-        from openai import OpenAI
-    except ImportError:
-        logger.warning("openai package not installed; skip Kimi narrative")
-        return ""
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    system = _read_system_prompt()
-    extra = _kimi_extra_body(model)
-
     user_text = (
         f"IMPRESSION (model):\n{impression}\n\n"
         f"PATHOLOGY_SCORES (0–1, TorchXRayVision ensemble):\n{scores_json}\n\n"
@@ -244,84 +175,42 @@ def _kimi_openai_narrative(
         "Write a concise radiology-style paragraph (India: TB endemicity, occupational exposure when relevant). "
         "Do not contradict the numeric scores."
     )
-
-    if use_vision and image_b64:
-        try:
-            jpeg_b64 = _to_jpeg_b64(image_b64)
-            create_kw: dict = {
-                "model": model,
-                "max_tokens": 1500,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{jpeg_b64}",
-                                },
-                            },
-                            {"type": "text", "text": user_text},
-                        ],
-                    },
-                ],
-            }
-            if extra is not None:
-                create_kw["extra_body"] = extra
-            r = client.chat.completions.create(**create_kw)
-            out = (r.choices[0].message.content or "").strip()
-            if out:
-                return out
-        except Exception as e:
-            logger.warning("Kimi vision narrative failed (%s), trying text-only: %s", model, e)
+    system = _read_system_prompt()
 
     try:
-        create_kw = {
-            "model": model,
-            "max_tokens": 1200,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_text},
-            ],
-        }
-        if extra is not None:
-            create_kw["extra_body"] = extra
-        r = client.chat.completions.create(**create_kw)
-        return (r.choices[0].message.content or "").strip()
-    except Exception as e:
-        logger.warning("Kimi text narrative failed: %s", e)
+        from llm_router import llm_router
+    except Exception as exc:
+        logger.warning("CXR narrative: llm_router unavailable: %s", exc)
         return ""
 
+    if image_b64:
+        try:
+            jpeg_b64 = _to_jpeg_b64(image_b64)
+            out = llm_router.complete_for_role(
+                "vision_primary",
+                system,
+                user_text,
+                image_b64=jpeg_b64,
+                image_mime="image/jpeg",
+                max_tokens=1500,
+            )
+            txt = (out.get("content") or "").strip()
+            if txt:
+                return txt
+        except Exception as exc:
+            logger.warning("OpenRouter CXR vision narrative failed: %s", exc)
 
-def _openai_text_only_narrative(
-    *,
-    api_key: str,
-    base_url: str,
-    model: str,
-    scores_json: str,
-    patient_json: str,
-    impression: str,
-) -> str:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    system = _read_system_prompt()
-    user = (
-        f"{system}\n\nIMPRESSION:\n{impression}\n\nSCORES:\n{scores_json}\n\nPATIENT:\n{patient_json}\n\n"
-        "Summarise in 2–5 sentences for a clinician. Do not invent numbers."
-    )
-    r = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": user[:24000],
-            },
-        ],
-        max_tokens=500,
-    )
-    return (r.choices[0].message.content or "").strip()
+    try:
+        out = llm_router.complete_for_role(
+            "narrative_default",
+            system,
+            user_text,
+            max_tokens=1200,
+        )
+        return (out.get("content") or "").strip()
+    except Exception as exc:
+        logger.warning("OpenRouter CXR text narrative failed: %s", exc)
+        return ""
 
 
 def attach_narrative(
@@ -330,7 +219,7 @@ def attach_narrative(
     image_b64: str | None = None,
 ) -> dict:
     """
-    Attach Kimi narrative report to any X-ray result with dict structures.
+    Attach OpenRouter narrative report to any X-ray result with dict structures.
     """
     st = result.get("structures")
     if not isinstance(st, dict):
@@ -345,9 +234,9 @@ def attach_narrative(
         st["narrative_report"] = narrative
         result["structures"] = st
         models = result.get("models_used")
-        if isinstance(models, list) and "Kimi-narrative-CXR" not in models:
-            models.append("Kimi-narrative-CXR")
+        if isinstance(models, list) and "OpenRouter-narrative-CXR" not in models:
+            models.append("OpenRouter-narrative-CXR")
             result["models_used"] = models
     elif XRAY_REQUIRE_KIMI_NARRATIVE:
-        raise RuntimeError("Kimi narrative is required for X-ray but generation failed.")
+        raise RuntimeError("LLM narrative is required for X-ray but generation failed.")
     return result

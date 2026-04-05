@@ -5,7 +5,7 @@ Paths (graceful degradation, no training in-repo):
   A) Clinical photo: EfficientNet-B3 + fine-tuned checkpoint (legacy) if present.
   B) Clinical photo: optional torchvision EfficientNet-V2-M weights file if present.
   C) Histopathology / H&E-style: UNI encoder (HF) + optional linear head; heuristic if no head.
-  D) Vision LLM (Anthropic) structured JSON fallback when local paths fail or are unavailable.
+  D) Vision LLM (OpenRouter; SSOT config/cloud_inference.yaml) structured JSON fallback when local paths fail or are unavailable.
 
 Never raises except OralServiceUnavailableError when ORAL_CANCER_ENABLED is false.
 """
@@ -39,12 +39,9 @@ from transformers import EfficientNetForImageClassification, EfficientNetImagePr
 from model_loader import LazyModel
 from disclaimer import DISCLAIMER
 from config import (
-    ANTHROPIC_ORAL_NARRATIVE_MODEL,
     CHECKPOINT_FILENAME,
-    CLAUDE_ORAL_MODEL,
     DEVICE,
     EFFNET_V2M_CHECKPOINT,
-    KIMI_ORAL_CANCER_MODEL,
     MODEL_DIR,
     ORAL_CANCER_ENABLED,
     UNI_HEAD_CHECKPOINT,
@@ -135,8 +132,12 @@ def _has_uni_head() -> bool:
     return os.path.isfile(_uni_head_path())
 
 
-def _has_anthropic() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+def _has_openrouter_cloud() -> bool:
+    for name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"):
+        k = (os.environ.get(name) or "").strip()
+        if k and len(k) >= 8:
+            return True
+    return False
 
 
 def get_loaded_status() -> dict[str, Any]:
@@ -145,7 +146,7 @@ def get_loaded_status() -> dict[str, Any]:
         "b3_checkpoint": _has_b3_checkpoint(),
         "effnet_v2m_weights": _has_v2m_weights(),
         "uni_head": _has_uni_head(),
-        "anthropic_configured": _has_anthropic(),
+        "openrouter_configured": _has_openrouter_cloud(),
         "oral_cancer_enabled": ORAL_CANCER_ENABLED,
         "efficientnet_loaded": efficientnet_model.is_loaded(),
     }
@@ -359,116 +360,45 @@ def _sniff_media_type(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-def _kimi_oral_vision_json(
+def _openrouter_oral_vision_json(
     image_b64: str,
     patient_context: dict[str, Any],
     clinical_notes: str,
-) -> dict[str, Any] | None:
-    """OpenAI-compatible vision (Moonshot Kimi / KIMI_API_KEY). Never raises."""
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if not key:
-        return None
+) -> tuple[dict[str, Any] | None, str]:
+    """OpenRouter vision + JSON (role oral_cancer). Returns (parsed, model_used_slug). Never raises."""
     try:
-        from openai import OpenAI
-    except ImportError:
-        return None
+        from llm_router import llm_router
+    except Exception:
+        return None, ""
+    system = (
+        "You output only JSON as specified. Indian oral oncology context. "
+        "Never claim histologic certainty from photos."
+    )
+    user_text = (
+        PROMPT_PATH.read_text()
+        + "\n\nPatient context JSON:\n"
+        + json.dumps(patient_context, ensure_ascii=False)
+        + "\nClinical notes:\n"
+        + (clinical_notes or "")
+    )
     try:
-        base = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-        model = KIMI_ORAL_CANCER_MODEL
-        client = OpenAI(api_key=key, base_url=base)
-        user_text = (
-            PROMPT_PATH.read_text()
-            + "\n\nPatient context JSON:\n"
-            + json.dumps(patient_context, ensure_ascii=False)
-            + "\nClinical notes:\n"
-            + (clinical_notes or "")
-        )
         media_type = _sniff_media_type(base64.b64decode(image_b64))
         mime = "image/png" if media_type == "image/png" else "image/jpeg"
-        extra: dict[str, Any] | None = None
-        if "kimi-k2" in model.lower():
-            extra = {"thinking": {"type": "disabled"}}
-        create_kw: dict[str, Any] = {
-            "model": model,
-            "max_tokens": 1200,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You output only JSON as specified. Indian oral oncology context. "
-                        "Never claim histologic certainty from photos."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime};base64,{image_b64}"},
-                        },
-                        {"type": "text", "text": user_text},
-                    ],
-                },
-            ],
-        }
-        if extra is not None:
-            create_kw["extra_body"] = extra
-        r = client.chat.completions.create(**create_kw)
-        txt = (r.choices[0].message.content or "").strip()
-        return _parse_json_from_text(txt)
-    except Exception as e:
-        logger.warning("Kimi oral vision JSON failed (soft): %s", e)
-        return None
-
-
-def _anthropic_oral_vision_json(
-    image_b64: str,
-    patient_context: dict[str, Any],
-    clinical_notes: str,
-) -> dict[str, Any] | None:
-    if not _has_anthropic():
-        return None
-    try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        system = (
-            "You output only JSON as specified. You support Indian oral oncology context. "
-            "Never claim histologic certainty from photos."
-        )
-        user_text = (
-            PROMPT_PATH.read_text()
-            + "\n\nPatient context JSON:\n"
-            + json.dumps(patient_context, ensure_ascii=False)
-            + "\nClinical notes:\n"
-            + (clinical_notes or "")
-        )
-        media_type = _sniff_media_type(base64.b64decode(image_b64))
-        msg = client.messages.create(
-            model=CLAUDE_ORAL_MODEL,
+        out = llm_router.complete_for_role(
+            "oral_cancer",
+            system,
+            user_text,
+            image_b64=image_b64,
+            image_mime=mime,
             max_tokens=1200,
-            system=system,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": image_b64,
-                            },
-                        },
-                        {"type": "text", "text": user_text},
-                    ],
-                }
-            ],
+            requires_json=True,
         )
-        return _parse_json_from_text(msg.content[0].text)
+        txt = (out.get("content") or "").strip()
+        mu = str(out.get("model_used") or "").strip()
+        return _parse_json_from_text(txt), mu
     except Exception as e:
-        logger.warning("Anthropic oral vision failed (soft): %s", e)
-        return None
+        logger.warning("OpenRouter oral vision JSON failed (soft): %s", e)
+        return None, ""
 
 
 def _vision_llm_oral(
@@ -476,16 +406,13 @@ def _vision_llm_oral(
     image_b64: str,
     patient_context: dict[str, Any],
     clinical_notes: str,
-) -> tuple[dict[str, Any] | None, str]:
-    """Returns (parsed_json, provider) where provider is kimi | anthropic | empty."""
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Returns (parsed_json, provider, vision_model_slug). Provider is openrouter | empty."""
     _ = pil_img
-    v = _kimi_oral_vision_json(image_b64, patient_context, clinical_notes)
+    v, mu = _openrouter_oral_vision_json(image_b64, patient_context, clinical_notes)
     if v:
-        return v, "kimi"
-    a = _anthropic_oral_vision_json(image_b64, patient_context, clinical_notes)
-    if a:
-        return a, "anthropic"
-    return None, ""
+        return v, "openrouter", mu
+    return None, "", ""
 
 
 def _merge_patient_context(
@@ -797,60 +724,48 @@ def _read_oral_cancer_system_prompt(prompt_path: Path | None) -> str:
     )
 
 
-def _anthropic_oral_cancer_narrative_text(
+def _openrouter_oral_cancer_narrative_text(
     system: str,
     user_text: str,
     image_b64: str,
-) -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key:
-        return ""
+) -> tuple[str, str]:
+    """OpenRouter narrative (role oral_cancer); vision if image present. Returns (text, model_tag). Never raises."""
     try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=key)
-        model = ANTHROPIC_ORAL_NARRATIVE_MODEL
+        from llm_router import llm_router
+    except Exception:
+        return "", ""
+    try:
         if image_b64 and len(image_b64.strip()) > 80:
             try:
                 raw = base64.b64decode(image_b64)
-                media_type = _sniff_media_type(raw)
-                msg = client.messages.create(
-                    model=model,
+                mime = _sniff_media_type(raw)
+                mime_s = "image/png" if mime == "image/png" else "image/jpeg"
+                out = llm_router.complete_for_role(
+                    "oral_cancer",
+                    system[:200000],
+                    user_text[:120000],
+                    image_b64=image_b64,
+                    image_mime=mime_s,
                     max_tokens=2000,
-                    system=system[:200000],
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": media_type,
-                                        "data": image_b64,
-                                    },
-                                },
-                                {"type": "text", "text": user_text[:120000]},
-                            ],
-                        }
-                    ],
                 )
-                return (msg.content[0].text or "").strip()
+                txt = (out.get("content") or "").strip()
+                if txt:
+                    mu = str(out.get("model_used") or "").strip()
+                    return txt, mu or "openrouter-oral-narrative"
             except Exception as e:
-                logger.warning("Anthropic oral narrative (vision) failed, trying text: %s", e)
-        msg = client.messages.create(
-            model=model,
+                logger.warning("OpenRouter oral narrative (vision) failed, trying text: %s", e)
+        out2 = llm_router.complete_for_role(
+            "oral_cancer",
+            system[:200000],
+            user_text[:120000],
             max_tokens=2000,
-            system=system[:200000],
-            messages=[{"role": "user", "content": user_text[:120000]}],
         )
-        return (msg.content[0].text or "").strip()
-    except ImportError:
-        logger.warning("anthropic not installed; skip oral narrative")
-        return ""
+        txt2 = (out2.get("content") or "").strip()
+        mu2 = str(out2.get("model_used") or "").strip()
+        return txt2, mu2 or "openrouter-oral-narrative"
     except Exception as e:
-        logger.warning("Anthropic oral narrative failed: %s", e)
-        return ""
+        logger.warning("OpenRouter oral narrative failed: %s", e)
+        return "", ""
 
 
 def _call_oral_cancer_narrative(
@@ -861,7 +776,7 @@ def _call_oral_cancer_narrative(
     prompt_path: Path | None = None,
 ) -> tuple[str, list[str], str]:
     """
-    Kimi (vision if image) → Kimi text → Anthropic (vision if image) → Anthropic text.
+    OpenRouter only (SSOT: config/cloud_inference.yaml role oral_cancer).
     Never raises.
     Returns (narrative_text, additional_emergency_flags, models_used_tag).
     """
@@ -898,71 +813,10 @@ Include India-specific context if relevant.
 Always include biopsy recommendation if any suspicious lesion.
 End with the disclaimer that AI screening is not histologic diagnosis."""
 
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if key:
-        try:
-            from openai import OpenAI
-
-            base_url = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-            model = KIMI_ORAL_CANCER_MODEL
-            client = OpenAI(api_key=key, base_url=base_url)
-            extra: dict[str, Any] | None = None
-            if "kimi-k2" in model.lower():
-                extra = {"thinking": {"type": "disabled"}}
-            if image_b64 and len(image_b64.strip()) > 80:
-                try:
-                    raw = base64.b64decode(image_b64)
-                    mime = _sniff_media_type(raw)
-                    mime = "image/png" if mime == "image/png" else "image/jpeg"
-                    create_kw: dict[str, Any] = {
-                        "model": model,
-                        "max_tokens": 2000,
-                        "messages": [
-                            {"role": "system", "content": system[:200000]},
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:{mime};base64,{image_b64}",
-                                        },
-                                    },
-                                    {"type": "text", "text": user_text},
-                                ],
-                            },
-                        ],
-                    }
-                    if extra is not None:
-                        create_kw["extra_body"] = extra
-                    r = client.chat.completions.create(**create_kw)
-                    out = (r.choices[0].message.content or "").strip()
-                    if out:
-                        return out, [], "Kimi-narrative-OralCancer"
-                except Exception as e:
-                    logger.warning("Kimi oral narrative (vision) failed: %s", e)
-            create_kw2: dict[str, Any] = {
-                "model": model,
-                "max_tokens": 2000,
-                "messages": [
-                    {"role": "system", "content": system[:200000]},
-                    {"role": "user", "content": user_text},
-                ],
-            }
-            if extra is not None:
-                create_kw2["extra_body"] = extra
-            r2 = client.chat.completions.create(**create_kw2)
-            out2 = (r2.choices[0].message.content or "").strip()
-            if out2:
-                return out2, [], "Kimi-narrative-OralCancer"
-        except ImportError:
-            logger.warning("openai not installed; skip Kimi oral narrative")
-        except Exception as e:
-            logger.warning("Kimi oral narrative failed: %s", e)
-
-    ant = _anthropic_oral_cancer_narrative_text(system, user_text, image_b64)
-    if ant:
-        return ant, [], "Anthropic-narrative-OralCancer"
+    text, mu = _openrouter_oral_cancer_narrative_text(system, user_text, image_b64)
+    if text:
+        tag = f"OpenRouter-narrative-oral:{mu}" if mu else "OpenRouter-narrative-oral"
+        return text, [], tag
     return "", [], ""
 
 
@@ -1069,21 +923,22 @@ def run_oral_cancer_pipeline(
 
     vision_data: dict[str, Any] | None = None
     vision_provider = ""
+    vision_model_slug = ""
     if score_bundle is None:
-        vision_data, vision_provider = _vision_llm_oral(pil_img, image_b64, ctx, clinical_notes)
+        vision_data, vision_provider, vision_model_slug = _vision_llm_oral(
+            pil_img, image_b64, ctx, clinical_notes
+        )
         if vision_data:
             score_bundle = _scores_from_vision(vision_data)
-            if vision_provider == "kimi":
-                models_used.append("kimi-vision-oral")
-                models_used.append(KIMI_ORAL_CANCER_MODEL)
-            elif vision_provider == "anthropic":
-                models_used.append("claude-vision-oral")
-                models_used.append(CLAUDE_ORAL_MODEL)
+            if vision_provider == "openrouter":
+                models_used.append("openrouter-vision-oral")
+                if vision_model_slug:
+                    models_used.append(vision_model_slug)
             lesion_location = _map_site_to_canonical(str(vision_data.get("lesion_site", lesion_location)))
             habit_v = str(vision_data.get("habit_risk", ""))
             if habit_v in ("tobacco", "betel", "combined", "none", "unknown"):
                 habit_risk = habit_v
-            model_path_note = "anthropic-vision"
+            model_path_note = "openrouter-vision"
         else:
             score_bundle = {
                 "normal": 0.34,
@@ -1100,7 +955,7 @@ def run_oral_cancer_pipeline(
                 "_desc": "No local classifier weights and vision LLM unavailable — non-specific placeholder scores only.",
             }
             limitation_notes.append(
-                "No fine-tuned oral weights and no vision LLM fallback (Kimi/Anthropic) — output is intentionally non-specific."
+                "No fine-tuned oral weights and no OpenRouter vision fallback — output is intentionally non-specific."
             )
             models_used.append("limitation-only")
 

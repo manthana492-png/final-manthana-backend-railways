@@ -2,7 +2,7 @@
 services/09_ultrasound/inference.py
 Manthana Ultrasound (USG) Pipeline
 GPU Sensor Layer: OpenUS backbone → structured scores
-Report Layer:     Kimi K2.5 → Claude fallback → heuristic impression
+Report Layer:     OpenRouter (SSOT) → heuristic impression fallback
 """
 
 import os
@@ -330,68 +330,6 @@ CRITICAL RULES:
 """
 
 
-def _call_kimi(system_prompt: str, user_content: str) -> Optional[str]:
-    try:
-        from openai import OpenAI
-
-        kimi_client = OpenAI(
-            api_key=os.environ.get("KIMI_API_KEY", ""),
-            base_url=os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1"),
-        )
-        model_name = (
-            os.environ.get("KIMI_LAB_MODEL")
-            or os.environ.get("KIMI_MODEL")
-            or "kimi-k2.5"
-        )
-        resp = kimi_client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=1200,
-            temperature=1.0,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:  # pragma: no cover - optional online path
-        log.warning("Kimi call failed: %s", e)
-        return None
-
-
-def _call_claude(
-    system_prompt: str, user_content: str, image_b64: Optional[str] = None
-) -> Optional[str]:
-    try:
-        import anthropic
-
-        client = anthropic.Anthropic(
-            api_key=os.environ.get("ANTHROPIC_API_KEY", "")
-        )
-        messages_content: list[dict] = []
-        if image_b64:
-            messages_content.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": image_b64,
-                    },
-                }
-            )
-        messages_content.append({"type": "text", "text": user_content})
-        resp = client.messages.create(
-            model=os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-            max_tokens=1200,
-            system=system_prompt,
-            messages=[{"role": "user", "content": messages_content}],
-        )
-        return resp.content[0].text.strip()
-    except Exception as e:  # pragma: no cover - optional online path
-        log.warning("Claude call failed: %s", e)
-        return None
-
-
 def _heuristic_impression(scores: dict, patient_context: dict) -> str:
     parts: list[str] = []
     if scores.get("free_fluid_indicator", 0.0) > 0.35:
@@ -418,7 +356,7 @@ def _generate_usg_narrative(
     frames: list[Image.Image],
     image_b64: Optional[str] = None,
 ) -> str:
-    """Kimi K2.5 → Claude (with image) → heuristic fallback."""
+    """OpenRouter (role narrative_usg) with optional frame thumbnail → heuristic fallback."""
     ctx_str = json.dumps(patient_context, indent=2) if patient_context else "Not provided"
     system_prompt = _USG_SYSTEM_PROMPT.format(
         scores_json=json.dumps(scores, indent=2),
@@ -429,19 +367,43 @@ def _generate_usg_narrative(
         "and patient context above. Apply Indian clinical priors."
     )
 
-    narrative = _call_kimi(system_prompt, user_msg)
-    if narrative:
-        return narrative
-
     thumb_b64 = image_b64
     if frames and not thumb_b64:
         buf = io.BytesIO()
         frames[0].resize((512, 512)).save(buf, format="JPEG", quality=75)
         thumb_b64 = base64.b64encode(buf.getvalue()).decode()
 
-    narrative = _call_claude(system_prompt, user_msg, image_b64=thumb_b64)
-    if narrative:
-        return narrative
+    try:
+        from llm_router import llm_router
+
+        if thumb_b64:
+            try:
+                out = llm_router.complete_for_role(
+                    "narrative_usg",
+                    system_prompt,
+                    user_msg,
+                    image_b64=thumb_b64,
+                    image_mime="image/jpeg",
+                    max_tokens=1200,
+                    temperature=0.25,
+                )
+                t = (out.get("content") or "").strip()
+                if t:
+                    return t
+            except Exception as e:
+                log.warning("OpenRouter USG vision narrative failed: %s", e)
+        out = llm_router.complete_for_role(
+            "narrative_usg",
+            system_prompt,
+            user_msg,
+            max_tokens=1200,
+            temperature=0.25,
+        )
+        t = (out.get("content") or "").strip()
+        if t:
+            return t
+    except Exception as e:
+        log.warning("OpenRouter USG narrative failed: %s", e)
 
     return _heuristic_impression(scores, patient_context)
 

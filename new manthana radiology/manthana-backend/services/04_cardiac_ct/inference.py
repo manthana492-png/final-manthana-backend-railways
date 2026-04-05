@@ -25,36 +25,10 @@ PIPELINE_VERSION = "manthana-ct-v2"
 def _cardiac_narrative_policy() -> str:
     """
     CT_CARDIAC_NARRATIVE_POLICY:
-      - off (default): no LLM narrative — contract explicit for production
-      - kimi_then_anthropic: Kimi first, then Anthropic
-      - kimi_only: Kimi only
+      - off (default): no LLM narrative
+      - openrouter (default) | off: OpenRouter only (SSOT: config/cloud_inference.yaml)
     """
     return os.environ.get("CT_CARDIAC_NARRATIVE_POLICY", "off").strip().lower()
-
-
-def _anthropic_cardiac_narrative(system: str, user_text: str) -> str:
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key:
-        return ""
-    try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=key)
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-        msg = client.messages.create(
-            model=model,
-            max_tokens=1200,
-            system=system[:20000],
-            messages=[{"role": "user", "content": user_text[:120000]}],
-        )
-        block = msg.content[0]
-        return getattr(block, "text", str(block)).strip()
-    except ImportError:
-        logger.warning("anthropic not installed; skip cardiac narrative")
-        return ""
-    except Exception as e:
-        logger.warning("Cardiac Anthropic narrative failed: %s", e)
-        return ""
 
 
 def _call_cardiac_ct_narrative(
@@ -83,42 +57,21 @@ def _call_cardiac_ct_narrative(
         f"PATIENT_CONTEXT:\n{patient_json}"
     )
 
-    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY") or "").strip()
-    if key and policy in ("kimi_then_anthropic", "kimi_only"):
-        try:
-            from openai import OpenAI
-        except ImportError:
-            logger.warning("openai not installed; skip cardiac Kimi narrative")
-        else:
-            base_url = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-            model = (
-                os.environ.get("KIMI_CT_MODEL", "").strip()
-                or os.environ.get("KIMI_MODEL", "kimi-k2.5").strip()
-            )
-            try:
-                client = OpenAI(api_key=key, base_url=base_url)
-                r = client.chat.completions.create(
-                    model=model,
-                    max_tokens=1200,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_text},
-                    ],
-                )
-                out = (r.choices[0].message.content or "").strip()
-                if out:
-                    tags.append("Kimi-narrative-Cardiac")
-                    return out, tags
-            except Exception as e:
-                logger.warning("Cardiac Kimi narrative failed: %s", e)
+    try:
+        from llm_router import llm_router
 
-    if policy == "kimi_only":
-        return "", tags
-
-    ant = _anthropic_cardiac_narrative(system, user_text)
-    if ant:
-        tags.append("Anthropic-narrative-Cardiac")
-        return ant, tags
+        out = llm_router.complete_for_role(
+            "narrative_ct",
+            system,
+            user_text,
+            max_tokens=1200,
+        )
+        txt = (out.get("content") or "").strip()
+        if txt:
+            tags.append("OpenRouter-narrative-Cardiac")
+            return txt, tags
+    except Exception as e:
+        logger.warning("Cardiac CT OpenRouter narrative failed: %s", e)
     return "", tags
 
 
