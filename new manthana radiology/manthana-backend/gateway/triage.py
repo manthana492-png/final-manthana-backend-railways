@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.join(_BACKEND_ROOT, "shared"))
 if os.path.isdir("/app/shared"):
     sys.path.insert(0, "/app/shared")
 
-from txrv_utils import triage_forward_probs, get_txrv_runtime_stats  # noqa: E402
+# Lazy-import txrv_utils inside _triage_xray only — avoids loading PyTorch/torchxrayvision
+# at gateway startup when XRAY_TRIAGE_POLICY=always_deep (default) and CPU-only Railway.
 
 logger = logging.getLogger("manthana.gateway.triage")
 
@@ -41,6 +42,8 @@ def _triage_xray(path: str) -> dict[str, Any]:
     """
     DenseNet121 torchxrayvision — fast pathology screening (shared singleton + preprocess).
     """
+    from txrv_utils import get_txrv_runtime_stats, triage_forward_probs  # noqa: E402
+
     t0 = time.perf_counter()
     try:
         probs, names = triage_forward_probs(path)

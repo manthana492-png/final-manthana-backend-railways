@@ -18,11 +18,12 @@ import time
 import shutil
 import httpx
 import logging
+import zipfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Annotated, List, Optional, Union
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi.staticfiles import StaticFiles
@@ -42,7 +43,13 @@ from schemas import (
     CopilotRequest,
     CopilotResponse,
 )
-from triage import run_triage
+
+
+def invoke_triage(saved_path: str, modality: str):
+    """Load triage only when needed so slim Railway images start without torch/torchxrayvision."""
+    from triage import run_triage as _run_triage
+
+    return _run_triage(saved_path, modality)
 
 
 def _gateway_cors_allow_origins() -> list[str]:
@@ -82,6 +89,7 @@ MODEL_DISPLAY_NAMES = {
     "TotalSegmentator": "Manthana Segment Engine",
     "TotalSegmentator-heartchambers": "Manthana Segment Engine",
     "TotalSegmentator-vertebrae": "Manthana Segment Engine",
+    "Film-photo-stack": "Manthana Film Reconstruction",
     "SynthSeg": "Manthana Neuro Engine",
     # Pathology / cytology
     "Virchow": "Manthana Pathology Engine",
@@ -241,6 +249,47 @@ async def _validate_secrets():
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/manthana_uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# CPU narrative assembly (Docker default or Railway HTTPS). No trailing slash.
+REPORT_ASSEMBLY_URL = os.getenv(
+    "REPORT_ASSEMBLY_URL", "http://report_assembly:8020"
+).rstrip("/")
+
+# CT/MRI modalities that accept ZIP or multi-file film-photo batches (gateway bundles extras into one ZIP).
+_FILM_PHOTO_GATEWAY_MODALITIES = frozenset(
+    {"ct_brain", "brain_mri", "cardiac_ct", "spine_neuro", "abdominal_ct"}
+)
+
+
+async def _bundle_film_photos_as_zip(
+    job_id: str,
+    main_saved_path: str,
+    main_filename: str | None,
+    extras: List[UploadFile],
+) -> tuple[str, str]:
+    """
+    Pack the primary upload plus additional images into a single ZIP for downstream extract.
+    Caller must have at least 3 extras so total images >= 4 with the main file.
+    """
+    bundle_dir = os.path.join(UPLOAD_DIR, f"{job_id}_film_bundle")
+    os.makedirs(bundle_dir, exist_ok=True)
+    try:
+        ext = Path(main_filename or "image").suffix or ".bin"
+        shutil.copy2(main_saved_path, os.path.join(bundle_dir, f"00_main{ext}"))
+        for i, uf in enumerate(extras, start=1):
+            raw = await uf.read()
+            safe = Path(uf.filename or f"extra_{i}.jpg").name
+            with open(os.path.join(bundle_dir, f"{i:02d}_{safe}"), "wb") as out:
+                out.write(raw)
+        zip_path = os.path.join(UPLOAD_DIR, f"{job_id}_film_photos.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in sorted(os.listdir(bundle_dir)):
+                fp = os.path.join(bundle_dir, name)
+                if os.path.isfile(fp):
+                    zf.write(fp, arcname=name)
+        return zip_path, "film_photos.zip"
+    finally:
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+
 # ── Heatmap static file serving ──
 HEATMAP_DIR = os.path.join(UPLOAD_DIR, "heatmaps")
 os.makedirs(HEATMAP_DIR, exist_ok=True)
@@ -283,6 +332,15 @@ async def analyze(
         None,
         description="Optional JSON object with patient context (e.g. dermatology age/sex/location)",
     ),
+    film_files: Annotated[
+        Optional[List[UploadFile]],
+        File(
+            description=(
+                "Optional extra images for CT/MRI film-photo mode: send with the main `file` so that "
+                "total uploads are at least 4 (1 main + 3+ here). Gateway bundles into a ZIP."
+            ),
+        ),
+    ] = None,
     token_data: dict = Depends(verify_token),
 ):
     """
@@ -355,7 +413,7 @@ async def analyze(
             "models_used": ["triage-policy-always-deep"],
         }
     else:
-        triage_result = run_triage(saved_path, canon)
+        triage_result = invoke_triage(saved_path, canon)
     if not triage_result["needs_deep"]:
         return {
             "job_id": job_id,
@@ -379,26 +437,43 @@ async def analyze(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Forward to service
+    forward_path = saved_path
+    forward_name = file.filename or "upload"
+    forward_mime = file.content_type or "application/octet-stream"
+    bundled_zip: str | None = None
+    extras = list(film_files or [])
+    if canon in _FILM_PHOTO_GATEWAY_MODALITIES and len(extras) >= 3:
+        bundled_zip, forward_name = await _bundle_film_photos_as_zip(
+            job_id, saved_path, file.filename, extras
+        )
+        forward_path = bundled_zip
+        forward_mime = "application/zip"
+
+    # Forward to service (retries help Modal/serverless cold starts)
     rid = getattr(request.state, "request_id", None) or str(uuid.uuid4())
     try:
+        response: Optional[httpx.Response] = None
         async with httpx.AsyncClient(timeout=600.0) as client:
-            with open(saved_path, "rb") as f:
-                response = await client.post(
-                    service_url,
-                    files={"file": (file.filename, f, file.content_type)},
-                    data={
-                        "job_id": job_id,
-                        "patient_id": patient_id or "",
-                        "series_dir": series_dir or "",
-                        "clinical_notes": clinical_notes or "",
-                        "source_modality": source_modality or "",
-                        "patient_context_json": patient_context_json or "",
-                    },
-                    headers={"X-Request-ID": rid},
-                )
+            for attempt in range(3):
+                with open(forward_path, "rb") as f:
+                    response = await client.post(
+                        service_url,
+                        files={"file": (forward_name, f, forward_mime)},
+                        data={
+                            "job_id": job_id,
+                            "patient_id": patient_id or "",
+                            "series_dir": series_dir or "",
+                            "clinical_notes": clinical_notes or "",
+                            "source_modality": source_modality or "",
+                            "patient_context_json": patient_context_json or "",
+                        },
+                        headers={"X-Request-ID": rid},
+                    )
+                if response.status_code not in (502, 503) or attempt >= 2:
+                    break
+                await asyncio.sleep(2.0 * (attempt + 1))
 
-        if response.status_code == 200:
+        if response is not None and response.status_code == 200:
             result = response.json()
             result["job_id"] = job_id
             result["processing_time_sec"] = round(time.time() - start_time, 2)
@@ -415,11 +490,12 @@ async def analyze(
             _trigger_case_embedding(job_id, patient_id, modality, result)
             
             return result
-        else:
+        elif response is not None:
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Service error: {response.text}",
             )
+        raise HTTPException(status_code=502, detail="No response from analysis service.")
 
     except httpx.TimeoutException:
         return GatewayResponse(
@@ -432,6 +508,12 @@ async def analyze(
             status_code=503,
             detail=f"Service '{modality}' is not available. Check if it's running.",
         )
+    finally:
+        if bundled_zip and os.path.isfile(bundled_zip):
+            try:
+                os.unlink(bundled_zip)
+            except OSError:
+                pass
 
 
 @app.get("/job/{job_id}/status")
@@ -622,7 +704,7 @@ async def single_report(
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                "http://report_assembly:8020/assemble_report",
+                f"{REPORT_ASSEMBLY_URL}/assemble_report",
                 json=payload,
             )
         if response.status_code == 200:
@@ -722,7 +804,7 @@ async def unified_report(
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                "http://report_assembly:8020/assemble_unified_report",
+                f"{REPORT_ASSEMBLY_URL}/assemble_unified_report",
                 json=request.model_dump(),
             )
 
@@ -815,6 +897,91 @@ async def pacs_proxy(
             status_code=504,
             detail="PACS request timed out. The Orthanc server may be slow or unreachable.",
         )
+
+
+# ════════════════════════════════════════════════════════
+# ORACLE SERVICE REVERSE PROXY (/v1/*)
+# Forwards to oracle-service (chat, M5, health). Use ORACLE_SERVICE_URL with
+# *.railway.internal on Railway for free private egress.
+# ════════════════════════════════════════════════════════
+
+ORACLE_SERVICE_URL = os.getenv("ORACLE_SERVICE_URL", "http://oracle_service:8000").rstrip(
+    "/"
+)
+
+_ORACLE_SKIP_REQ_HEADERS = frozenset(
+    {"host", "content-length", "transfer-encoding", "connection", "te"}
+)
+_ORACLE_SKIP_RESP_HEADERS = frozenset(
+    {"transfer-encoding", "connection", "content-length"}
+)
+
+
+@app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])
+async def oracle_proxy(
+    path: str,
+    request: Request,
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Proxy Oracle API (e.g. POST /v1/chat SSE, /v1/chat/m5, GET /v1/health).
+    Requires the same Bearer JWT as other protected routes (Supabase or legacy).
+    """
+    target_url = f"{ORACLE_SERVICE_URL}/v1/{path}"
+    if request.url.query:
+        target_url += f"?{request.url.query}"
+
+    body = await request.body()
+    forward_headers = {}
+    for key, value in request.headers.items():
+        if key.lower() not in _ORACLE_SKIP_REQ_HEADERS:
+            forward_headers[key] = value
+
+    timeout = httpx.Timeout(300.0, connect=30.0)
+    client = httpx.AsyncClient(timeout=timeout)
+    try:
+        req = client.build_request(
+            request.method,
+            target_url,
+            headers=forward_headers,
+            content=body if body else None,
+        )
+        upstream = await client.send(req, stream=True)
+    except httpx.ConnectError:
+        await client.aclose()
+        raise HTTPException(
+            status_code=503,
+            detail="Oracle service is not available. Check ORACLE_SERVICE_URL.",
+        ) from None
+    except httpx.TimeoutException:
+        await client.aclose()
+        raise HTTPException(
+            status_code=504,
+            detail="Oracle request timed out.",
+        ) from None
+    except Exception:
+        await client.aclose()
+        raise
+
+    out_headers = {
+        k: v
+        for k, v in upstream.headers.items()
+        if k.lower() not in _ORACLE_SKIP_RESP_HEADERS
+    }
+
+    async def _iterate():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _iterate(),
+        status_code=upstream.status_code,
+        headers=out_headers,
+    )
 
 
 def _trigger_case_embedding(job_id: str, patient_id: str, modality: str, result: dict):
