@@ -1,0 +1,14 @@
+# Gateway image for Railway: no PyTorch / embeddings stack.
+# Set XRAY_TRIAGE_POLICY=always_deep and omit case-embedding features, or use full requirements.txt locally.
+
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+httpx==0.28.*
+openai>=1.0
+PyJWT==2.10.*
+python-multipart==0.0.*
+pydantic==2.*
+redis==5.*
+rq==2.*
+numpy>=1.24
+Pillow>=10.0
