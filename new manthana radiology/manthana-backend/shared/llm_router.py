@@ -1,5 +1,6 @@
 """
 Manthana — OpenRouter-only LLM router (SSOT: ../../config/cloud_inference.yaml).
+Includes schema enforcement via instructor library and contradiction detection.
 """
 
 from __future__ import annotations
@@ -9,14 +10,40 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Type, Union
 
 logger = logging.getLogger("manthana.llm_router")
 
-# Repo root: manthana-backend/shared/llm_router.py -> parents[3] = this_studio
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+def _compute_repo_root() -> Path:
+    """Resolve repo root containing packages/manthana-inference (this_studio) or set MANTHANA_LLM_REPO_ROOT."""
+    env = (os.environ.get("MANTHANA_LLM_REPO_ROOT") or "").strip()
+    if env:
+        return Path(env).resolve()
+    here = Path(__file__).resolve().parent
+    for parent in (here, *here.parents):
+        mi = parent / "packages" / "manthana-inference" / "src"
+        if mi.is_dir():
+            return parent
+    # Railway report_assembly image: /app/shared/llm_router.py + /app/packages/manthana-inference
+    p = Path(__file__).resolve()
+    if p.parent.name == "shared":
+        cand = p.parents[1] / "packages" / "manthana-inference" / "src"
+        if cand.is_dir():
+            return p.parents[1]
+    # Legacy monorepo: manthana-backend/shared/llm_router.py -> .../this_studio
+    try:
+        return p.parents[3]
+    except IndexError:
+        try:
+            return p.parents[2]
+        except IndexError:
+            return p.parent
+
+
+_REPO_ROOT = _compute_repo_root()
 _MI_SRC = _REPO_ROOT / "packages" / "manthana-inference" / "src"
-if str(_MI_SRC) not in sys.path:
+if _MI_SRC.is_dir() and str(_MI_SRC) not in sys.path:
     sys.path.insert(0, str(_MI_SRC))
 
 from manthana_inference import (  # type: ignore  # noqa: E402
@@ -25,6 +52,20 @@ from manthana_inference import (  # type: ignore  # noqa: E402
     load_cloud_inference_config,
     resolve_role,
 )
+
+from schema_enforcement import (
+    MODALITY_SCHEMAS,
+    get_schema_for_modality,
+    validate_llm_output,
+)
+from contradiction_detector import check_narrative_consistency
+
+try:
+    from instructor import from_openai
+    INSTRUCTOR_AVAILABLE = True
+except ImportError:
+    INSTRUCTOR_AVAILABLE = False
+    logger.debug("instructor library not available; schema enforcement will be post-hoc")
 
 
 class TaskType:
@@ -86,7 +127,13 @@ class LLMRouter:
         requires_json: bool = False,
         force_model: Optional[str] = None,
     ) -> Dict[str, Any]:
-        _ = force_model  # reserved — models come from cloud_inference.yaml
+        """
+        Complete text with LLM via OpenRouter.
+        force_model param is deprecated - models come from cloud_inference.yaml roles.
+        """
+        if force_model:
+            logger.warning("force_model parameter is deprecated; models are configured via cloud_inference.yaml")
+        
         keys = _openrouter_keys()
         if not keys:
             raise ValueError(
@@ -101,10 +148,12 @@ class LLMRouter:
         messages = self._build_messages(system_prompt, prompt)
         fmt = {"type": "json_object"} if requires_json else None
         last_err: Optional[Exception] = None
+        usage_info: Dict[str, Any] = {}
+        
         for api_key in keys:
             try:
                 client = build_openrouter_sync_client(api_key, cfg)
-                text, model_used = chat_complete_sync(
+                text, model_used, usage_info = chat_complete_sync(
                     client,
                     cfg,
                     role,
@@ -115,7 +164,7 @@ class LLMRouter:
                 return {
                     "content": text,
                     "model_used": model_used,
-                    "usage": {},
+                    "usage": usage_info or {},
                     "finish_reason": "stop",
                 }
             except Exception as e:
@@ -133,10 +182,13 @@ class LLMRouter:
         max_tokens: Optional[int] = None,
         requires_json: bool = False,
         image_b64: Optional[str] = None,
+        image_b64_list: Optional[List[str]] = None,
         image_mime: str = "image/jpeg",
     ) -> Dict[str, Any]:
         """
         Text or vision completion for an arbitrary SSOT role (e.g. narrative_mri, vision_primary).
+        Supports single image (image_b64) or multiple images (image_b64_list) for film-photo mode.
+        Returns dict with content, model_used, and usage information.
         """
         keys = _openrouter_keys()
         if not keys:
@@ -156,7 +208,17 @@ class LLMRouter:
         sys_c = (system_prompt or "")[:200000]
         user_c = user_text[:200000]
         user_content: Union[str, List[Dict[str, Any]]]
-        if image_b64 and image_b64.strip():
+        
+        # Build multi-image content for film-photo mode
+        if image_b64_list and len(image_b64_list) > 0:
+            content_parts: List[Dict[str, Any]] = []
+            for b64 in image_b64_list:
+                if b64 and b64.strip():
+                    url = f"data:{image_mime};base64,{b64.strip()}"
+                    content_parts.append({"type": "image_url", "image_url": {"url": url}})
+            content_parts.append({"type": "text", "text": user_c})
+            user_content = content_parts
+        elif image_b64 and image_b64.strip():
             url = f"data:{image_mime};base64,{image_b64.strip()}"
             user_content = [
                 {"type": "image_url", "image_url": {"url": url}},
@@ -172,10 +234,12 @@ class LLMRouter:
 
         fmt: Optional[Dict[str, Any]] = {"type": "json_object"} if requires_json else None
         last_err: Optional[Exception] = None
+        usage_info: Dict[str, Any] = {}
+        
         for api_key in keys:
             try:
                 client = build_openrouter_sync_client(api_key, cfg)
-                text, model_used = chat_complete_sync(
+                text, model_used, usage_info = chat_complete_sync(
                     client,
                     cfg,
                     role,
@@ -186,13 +250,94 @@ class LLMRouter:
                 return {
                     "content": text,
                     "model_used": model_used,
-                    "usage": {},
+                    "usage": usage_info or {},
                     "finish_reason": "stop",
                 }
             except Exception as e:
                 last_err = e
                 logger.warning("OpenRouter role=%s attempt failed: %s", role, e)
         raise RuntimeError(f"All OpenRouter keys failed for role {role!r}. Last error: {last_err}")
+
+    def complete_with_schema(
+        self,
+        role: str,
+        system_prompt: str,
+        user_text: str,
+        modality: str,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        image_b64: Optional[str] = None,
+        image_b64_list: Optional[List[str]] = None,
+        image_mime: str = "image/jpeg",
+        automated_scores: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Complete with schema enforcement and contradiction detection.
+        Supports single image or multiple images (film-photo mode).
+        
+        Args:
+            role: OpenRouter role from config
+            system_prompt: System context
+            user_text: User query/prompt
+            modality: Imaging modality for schema selection
+            automated_scores: Pipeline scores for contradiction detection
+            
+        Returns:
+            Dict with structured output, validation results, and contradiction report
+        """
+        # Get base completion
+        result = self.complete_for_role(
+            role=role,
+            system_prompt=system_prompt,
+            user_text=user_text,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            requires_json=True,
+            image_b64=image_b64,
+            image_b64_list=image_b64_list,
+            image_mime=image_mime,
+        )
+        
+        content = result.get("content", "")
+        structured_output = None
+        validation_error = None
+        
+        # Try to parse and validate JSON
+        try:
+            parsed = json.loads(content)
+            
+            # Validate against modality schema
+            is_valid, validated_or_error = validate_llm_output(parsed, modality)
+            
+            if is_valid:
+                structured_output = validated_or_error.model_dump()
+                result["schema_valid"] = True
+            else:
+                structured_output = parsed  # Return original even if invalid
+                result["schema_valid"] = False
+                result["schema_error"] = validated_or_error
+        except json.JSONDecodeError as e:
+            result["schema_valid"] = False
+            result["schema_error"] = f"JSON parse error: {e}"
+            structured_output = {"raw_text": content}
+        
+        # Run contradiction detection if automated scores provided
+        if automated_scores:
+            consistency = check_narrative_consistency(modality, automated_scores, content)
+            result["contradiction_check"] = consistency
+            result["contradictions_detected"] = not consistency["consistent"]
+        
+        result["structured_output"] = structured_output
+        result["modality"] = modality
+        return result
+
+    def get_schema_for_modality(self, modality: str) -> Optional[Type]:
+        """Get Pydantic schema class for a modality."""
+        schema_class = get_schema_for_modality(modality)
+        if schema_class.__name__ == "BaseModel":  # Default fallback
+            return None
+        return schema_class
 
     def get_model_info(self) -> dict:
         return {
