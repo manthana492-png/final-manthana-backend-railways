@@ -1,0 +1,44 @@
+# Report assembly for Railway / production: shared + cloud_inference + manthana-inference.
+#
+# Build context MUST be `this_studio` (contains packages/, config/, and manthana-backend path):
+#   cd this_studio
+#   docker build -f "new manthana radiology/manthana-backend/services/report_assembly/Dockerfile.railway" -t manthana-report-assembly .
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-noto \
+    fonts-noto-cjk \
+    fonts-noto-color-emoji \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libharfbuzz0b \
+    libffi-dev \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY ["packages/manthana-inference", "/app/packages/manthana-inference"]
+COPY ["config/cloud_inference.yaml", "/app/config/cloud_inference.yaml"]
+
+RUN pip install --no-cache-dir -U pip setuptools wheel \
+    && pip install --no-cache-dir -e /app/packages/manthana-inference \
+    && pip install --no-cache-dir "instructor>=1.0.0"
+
+COPY ["new manthana radiology/manthana-backend/services/report_assembly/requirements.txt", "/tmp/ra-requirements.txt"]
+RUN pip install --no-cache-dir -r /tmp/ra-requirements.txt
+
+COPY ["new manthana radiology/manthana-backend/shared", "/app/shared"]
+COPY ["new manthana radiology/manthana-backend/services/report_assembly", "/app"]
+
+ENV MANTHANA_LLM_REPO_ROOT=/app
+ENV PYTHONPATH=/app:/app/shared
+ENV CLOUD_INFERENCE_CONFIG_PATH=/app/config/cloud_inference.yaml
+
+RUN mkdir -p /tmp/manthana_reports
+
+EXPOSE 8020
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8020"]
