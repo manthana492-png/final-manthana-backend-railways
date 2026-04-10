@@ -115,10 +115,9 @@ def _dummy_jpeg_b64():
 
 def test_analyze_v1_structure_mocked_openrouter(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-xxxxxxxx")
+    monkeypatch.setenv("DERM_CLASSIFIER_PRIORITY", "openrouter")
 
     az = _load_dermatology_analyzer()
-
-    az._derm_classifier = None
 
     scores_json = json.dumps({
         "tinea": 0.71, "vitiligo": 0.03, "psoriasis": 0.02,
@@ -152,10 +151,9 @@ def test_analyze_v1_structure_mocked_openrouter(monkeypatch):
 
 def test_malignancy_critical_in_findings(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-xxxxxxxx")
+    monkeypatch.setenv("DERM_CLASSIFIER_PRIORITY", "openrouter")
 
     az = _load_dermatology_analyzer()
-
-    az._derm_classifier = None
 
     malignant_scores = json.dumps({
         **{c: 0.01 for c in [
@@ -189,3 +187,129 @@ def test_malignancy_critical_in_findings(monkeypatch):
     assert any(
         f.get("severity") == "critical" for f in result["findings"]
     )
+
+
+def test_ham_hint_triggers_critical_when_ham_mass_high():
+    sys.path.insert(0, _SHARED)
+    sys.path.insert(0, _DERM)
+    from classifier import DERM_CLASSES
+    from critical_flags import check_derm_critical
+
+    s = {c: 0.05 for c in DERM_CLASSES}
+    s["normal_benign"] = 0.4
+    hint = {
+        "ham_mel": 0.5,
+        "ham_bcc": 0.0,
+        "ham_akiec": 0.0,
+        "ham_combined_malignancy": 0.5,
+    }
+    r = check_derm_critical(s, ham_hint=hint)
+    assert r["is_critical"] is True
+    assert r.get("ham_malignancy_hint") == hint
+
+
+def test_ham7_mapping_normalizes_to_derm_classes():
+    sys.path.insert(0, _DERM)
+    from classifier import DERM_CLASSES
+    from ham_map import ham7_probs_to_derm_scores
+
+    order = ("akiec", "bcc", "bkl", "df", "mel", "nv", "vasc")
+    probs = {k: 1.0 / 7.0 for k in order}
+    raw7, full = ham7_probs_to_derm_scores(probs, order)
+    assert len(raw7) == 7
+    total = sum(float(full[k]) for k in DERM_CLASSES)
+    assert abs(total - 1.0) < 0.02
+    assert full["top_class"] in DERM_CLASSES
+
+
+def test_b4_branch_skips_openrouter_scores(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-xxxxxxxx")
+    monkeypatch.setenv("DERM_CLASSIFIER_PRIORITY", "b4,openrouter")
+
+    az = _load_dermatology_analyzer()
+    sys.path.insert(0, _DERM)
+    from classifier import DERM_CLASSES
+
+    class FB4:
+        def model_for_cam(self):
+            return None
+
+        transform = None
+
+        def classify(self, pil):
+            d = {c: round(1.0 / 12, 4) for c in DERM_CLASSES}
+            d.update(
+                {
+                    "top_class": "tinea",
+                    "confidence": 0.12,
+                    "confidence_label": "low",
+                    "is_malignant_candidate": False,
+                }
+            )
+            return d
+
+    monkeypatch.setattr(az, "_try_load_ham_classifier", lambda: None)
+    monkeypatch.setattr(az, "_try_load_b4_classifier", lambda: FB4())
+
+    calls = {"narrative": 0, "scores": 0}
+
+    def _fake_openrouter(**kwargs):
+        if kwargs.get("requires_json"):
+            calls["scores"] += 1
+            return "{}", "bad"
+        calls["narrative"] += 1
+        return "IMPRESSION\nTest OK.\n", "openai/gpt-4o-mini"
+
+    monkeypatch.setattr(az, "_openrouter_derm_complete", _fake_openrouter)
+
+    result = az.analyze_dermatology(
+        image_b64=_dummy_jpeg_b64(),
+        patient_context={},
+        job_id="job-b4",
+    )
+    assert calls["scores"] == 0
+    assert calls["narrative"] == 1
+    assert result["structures"]["classifier_mode"] == "efficientnet_b4"
+    assert "EfficientNet-B4-derm" in result["models_used"]
+
+
+def test_analysisresponse_model_accepts_openrouter_pipeline(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-xxxxxxxx")
+    monkeypatch.setenv("DERM_CLASSIFIER_PRIORITY", "openrouter")
+
+    az = _load_dermatology_analyzer()
+    scores_json = json.dumps({
+        "tinea": 0.71,
+        "vitiligo": 0.03,
+        "psoriasis": 0.02,
+        "melasma": 0.01,
+        "acne": 0.01,
+        "eczema_dermatitis": 0.02,
+        "scabies": 0.05,
+        "urticaria": 0.01,
+        "bcc": 0.03,
+        "scc": 0.02,
+        "melanoma": 0.02,
+        "normal_benign": 0.07,
+        "top_class": "tinea",
+        "confidence": 0.71,
+        "confidence_label": "high",
+        "is_malignant_candidate": False,
+    })
+
+    def _fake_openrouter(**kwargs):
+        if kwargs.get("requires_json"):
+            return scores_json, "openai/gpt-4o-mini"
+        return "IMPRESSION\nOK.\n", "openai/gpt-4o-mini"
+
+    monkeypatch.setattr(az, "_openrouter_derm_complete", _fake_openrouter)
+    result = az.analyze_dermatology(
+        image_b64=_dummy_jpeg_b64(),
+        patient_context={},
+        job_id="job-ar",
+    )
+    result["processing_time_sec"] = 0.1
+    sys.path.insert(0, _SHARED)
+    from schemas import AnalysisResponse
+
+    AnalysisResponse(**result)

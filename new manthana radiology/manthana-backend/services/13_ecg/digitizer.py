@@ -1,25 +1,14 @@
 """
-Manthana — ECG Digitiser
+Manthana — ECG Digitiser (OpenCV + scipy only)
 Converts camera photos of paper ECG strips to 12-lead digital signals.
-
-Based on PhysioNet Challenge 2024 approaches.
-Auto-downloads model weights on first run.
+No neural weights or external downloads.
 """
 
-import os
-import sys
 import logging
 import numpy as np
 from typing import Tuple
 
-sys.path.insert(0, "/app/shared")
-
-from model_loader import download_weights
-
 logger = logging.getLogger("manthana.ecg_digitizer")
-
-MODEL_DIR = os.getenv("MODEL_DIR", "/models")
-DIGITIZER_DIR = os.path.join(MODEL_DIR, "ecg_digitizer")
 
 
 def digitize_ecg_image(filepath: str, target_rate: int = 500) -> Tuple[np.ndarray, int]:

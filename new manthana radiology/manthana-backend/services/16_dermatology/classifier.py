@@ -57,6 +57,9 @@ class DermClassifier:
         )
         return m
 
+    def model_for_cam(self) -> nn.Module:
+        return self.model
+
     def classify(self, pil_image: Image.Image) -> dict:
         t = self.transform(pil_image).unsqueeze(0).to(self.device)
         with torch.no_grad():

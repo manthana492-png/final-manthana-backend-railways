@@ -1,7 +1,7 @@
 """
 Manthana Dermatology Engine — OpenRouter vision (DermAI system prompt; SSOT config/cloud_inference.yaml)
 + structured scores + narrative.
-V2: optional EfficientNet-B4 checkpoint replaces the score-extraction API call only.
+Local scores (priority): HAM7 EfficientNet-V2-M → EfficientNet-B4 → OpenRouter vision JSON.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -36,15 +37,51 @@ logger = logging.getLogger("manthana.dermatology")
 
 DERMAI_SYSTEM_PATH = Path(__file__).parent / "prompts" / "dermatology_dermai_system.txt"
 
-_derm_classifier: Any = None
+_derm_ham: Any = None
+_derm_b4: Any = None
+_ham_load_attempted = False
+_b4_load_attempted = False
 _dermai_system_text: str | None = None
 
 
-def _try_load_classifier() -> None:
-    """Load V2 classifier only if weights exist; never blocks or raises."""
-    global _derm_classifier
-    if _derm_classifier is not None:
-        return
+@dataclass
+class _ScoreBranch:
+    condition_scores: dict[str, Any]
+    classifier_mode: str
+    score_model_slug: str
+    ham10000_scores: dict[str, float] | None
+    ham_hint: dict[str, float] | None
+    cam_model: Any
+    cam_transform: Any
+    cam_class_order: list[str]
+    cam_top_class: str
+    models_used_score: str
+
+
+def _try_load_ham_classifier() -> Any:
+    global _derm_ham, _ham_load_attempted
+    if _ham_load_attempted:
+        return _derm_ham
+    _ham_load_attempted = True
+    try:
+        from config import DEVICE, HAM7_CLASS_ORDER, HAM_CHECKPOINT_FILENAME, MODEL_DIR
+
+        from ham_classifier import DermHamClassifier
+
+        mp = Path(MODEL_DIR) / HAM_CHECKPOINT_FILENAME
+        if mp.is_file():
+            _derm_ham = DermHamClassifier(mp, HAM7_CLASS_ORDER, device=DEVICE)
+            logger.info("DermHamClassifier loaded from %s", mp)
+    except Exception as e:
+        logger.debug("HAM classifier not loaded: %s", e)
+    return _derm_ham
+
+
+def _try_load_b4_classifier() -> Any:
+    global _derm_b4, _b4_load_attempted
+    if _b4_load_attempted:
+        return _derm_b4
+    _b4_load_attempted = True
     try:
         from config import CHECKPOINT_FILENAME, DEVICE, MODEL_DIR
 
@@ -52,10 +89,96 @@ def _try_load_classifier() -> None:
 
         mp = Path(MODEL_DIR) / CHECKPOINT_FILENAME
         if mp.is_file():
-            _derm_classifier = DermClassifier(mp, DEVICE)
-            logger.info("DermClassifier loaded from %s", mp)
+            _derm_b4 = DermClassifier(mp, DEVICE)
+            logger.info("DermClassifier (B4) loaded from %s", mp)
     except Exception as e:
-        logger.debug("V2 classifier not loaded: %s", e)
+        logger.debug("B4 classifier not loaded: %s", e)
+    return _derm_b4
+
+
+def _resolve_score_branch(
+    pil_image: Image.Image,
+    patient_context: dict[str, Any],
+    system_prompt: str,
+    image_bytes: bytes,
+) -> _ScoreBranch:
+    from config import DERM_CLASSIFIER_PRIORITY, HAM7_CLASS_ORDER
+
+    for tier in DERM_CLASSIFIER_PRIORITY:
+        if tier == "ham_v2":
+            ham = _try_load_ham_classifier()
+            if ham is not None:
+                from ham_map import ham7_probs_to_derm_scores, ham_malignancy_hint
+
+                probs = ham.classify(pil_image)
+                raw7, mapped = ham7_probs_to_derm_scores(probs, HAM7_CLASS_ORDER)
+                condition_scores = _normalize_condition_scores(mapped)
+                ham_hint = ham_malignancy_hint(probs, HAM7_CLASS_ORDER)
+                top_ham = max(probs, key=probs.get)
+                return _ScoreBranch(
+                    condition_scores=condition_scores,
+                    classifier_mode="efficientnet_v2m_ham7",
+                    score_model_slug="",
+                    ham10000_scores=raw7,
+                    ham_hint=ham_hint,
+                    cam_model=ham.model_for_cam(),
+                    cam_transform=ham.transform,
+                    cam_class_order=list(HAM7_CLASS_ORDER),
+                    cam_top_class=top_ham,
+                    models_used_score="EfficientNet-V2-M-HAM7",
+                )
+        if tier == "b4":
+            b4 = _try_load_b4_classifier()
+            if b4 is not None:
+                mapped = b4.classify(pil_image)
+                condition_scores = _normalize_condition_scores(mapped)
+                top = str(condition_scores.get("top_class", "normal_benign"))
+                return _ScoreBranch(
+                    condition_scores=condition_scores,
+                    classifier_mode="efficientnet_b4",
+                    score_model_slug="",
+                    ham10000_scores=None,
+                    ham_hint=None,
+                    cam_model=b4.model_for_cam(),
+                    cam_transform=b4.transform,
+                    cam_class_order=list(DERM_CLASSES),
+                    cam_top_class=top,
+                    models_used_score="EfficientNet-B4-derm",
+                )
+        if tier == "openrouter":
+            condition_scores, slug = _get_openrouter_condition_scores(
+                patient_context, system_prompt, image_bytes
+            )
+            top = str(condition_scores.get("top_class", "normal_benign"))
+            return _ScoreBranch(
+                condition_scores=condition_scores,
+                classifier_mode="openrouter_vision_v1",
+                score_model_slug=slug,
+                ham10000_scores=None,
+                ham_hint=None,
+                cam_model=None,
+                cam_transform=None,
+                cam_class_order=[],
+                cam_top_class=top,
+                models_used_score="openrouter-vision-derm-scores",
+            )
+
+    condition_scores, slug = _get_openrouter_condition_scores(
+        patient_context, system_prompt, image_bytes
+    )
+    top = str(condition_scores.get("top_class", "normal_benign"))
+    return _ScoreBranch(
+        condition_scores=condition_scores,
+        classifier_mode="openrouter_vision_v1",
+        score_model_slug=slug,
+        ham10000_scores=None,
+        ham_hint=None,
+        cam_model=None,
+        cam_transform=None,
+        cam_class_order=[],
+        cam_top_class=top,
+        models_used_score="openrouter-vision-derm-scores",
+    )
 
 
 def _load_dermai_system_prompt() -> str:
@@ -250,14 +373,12 @@ def analyze_dermatology(
 ) -> dict[str, Any]:
     """
     Full pipeline. Returns a dict suitable for AnalysisResponse(**d).
-    Two OpenRouter calls when scores come from vision; one OpenRouter call if V2 classifier supplies scores.
+    One OpenRouter call when local classifiers supply scores; two when scores are from vision.
     """
-    _try_load_classifier()
-
     image_bytes = base64.b64decode(image_b64)
     pil_image = Image.open(BytesIO(image_bytes)).convert("RGB")
     w, h = pil_image.size
-    from config import DERM_MAX_IMAGE_PIXELS
+    from config import DERM_GRADCAM, DERM_MAX_IMAGE_PIXELS, DEVICE
 
     if w * h > DERM_MAX_IMAGE_PIXELS:
         raise ValueError(
@@ -265,18 +386,28 @@ def analyze_dermatology(
         )
 
     system_prompt = _load_dermai_system_prompt()
-    score_model_slug = ""
+    br = _resolve_score_branch(pil_image, patient_context, system_prompt, image_bytes)
+    condition_scores = br.condition_scores
+    classifier_mode = br.classifier_mode
+    score_model_slug = br.score_model_slug
 
-    if _derm_classifier is not None:
-        condition_scores = _derm_classifier.classify(pil_image)
-        classifier_mode = "efficientnet_b4"
-    else:
-        condition_scores, score_model_slug = _get_openrouter_condition_scores(
-            patient_context, system_prompt, image_bytes
-        )
-        classifier_mode = "openrouter_vision_v1"
+    critical = check_derm_critical(condition_scores, ham_hint=br.ham_hint)
 
-    critical = check_derm_critical(condition_scores)
+    gradcam_b64: str | None = None
+    if DERM_GRADCAM and br.cam_model is not None and br.cam_transform is not None:
+        try:
+            from explainability import try_explainability_png
+
+            gradcam_b64 = try_explainability_png(
+                br.cam_model,
+                pil_image,
+                br.cam_transform,
+                br.cam_class_order,
+                br.cam_top_class,
+                DEVICE,
+            )
+        except Exception as e:
+            logger.debug("Grad-CAM omitted: %s", e)
 
     measurements_json = json.dumps(
         {
@@ -287,6 +418,7 @@ def analyze_dermatology(
                 "confidence_label": condition_scores.get("confidence_label"),
                 "is_malignant_candidate": condition_scores.get("is_malignant_candidate"),
             },
+            "ham10000_scores": br.ham10000_scores,
             "critical_flag": critical,
             "patient_context": patient_context,
             "classifier_mode": classifier_mode,
@@ -321,17 +453,32 @@ def analyze_dermatology(
     findings = _build_findings(condition_scores, critical)
     impression = _extract_impression(report_text)
 
-    models_used: list[str] = []
-    if classifier_mode == "efficientnet_b4":
-        models_used.append("EfficientNet-B4-derm")
-    else:
-        models_used.append("openrouter-vision-derm-scores")
-        if score_model_slug:
-            models_used.append(score_model_slug)
+    models_used: list[str] = [br.models_used_score]
+    if score_model_slug:
+        models_used.append(score_model_slug)
     if narr_model_slug:
         models_used.append(narr_model_slug)
     else:
         models_used.append("openrouter-dermatology")
+
+    structures: dict[str, Any] = {
+        "critical": critical,
+        "patient_context": patient_context,
+        "narrative_report": report_text,
+        "classifier_mode": classifier_mode,
+        "top_condition": top_class,
+    }
+    if br.ham10000_scores is not None:
+        structures["ham10000_scores"] = br.ham10000_scores
+    if gradcam_b64:
+        structures["derm_gradcam_png_base64"] = gradcam_b64
+
+    disclaimer = DISCLAIMER
+    if gradcam_b64:
+        disclaimer += (
+            " Model attention map overlays highlight regions the network emphasized; "
+            "they are not histopathology and must not be read as tissue diagnosis."
+        )
 
     return {
         "job_id": job_id or "",
@@ -340,23 +487,23 @@ def analyze_dermatology(
         "findings": findings,
         "impression": impression or report_text[:300],
         "pathology_scores": pathology_scores,
-        "structures": {
-            "critical": critical,
-            "patient_context": patient_context,
-            "narrative_report": report_text,
-            "classifier_mode": classifier_mode,
-            "top_condition": top_class,
-        },
+        "structures": structures,
         "confidence": conf_label,
         "confidence_score": conf_score,
         "models_used": models_used,
-        "disclaimer": DISCLAIMER,
+        "disclaimer": disclaimer,
     }
 
 
 def get_ready() -> dict[str, Any]:
-    """Ready when OPENROUTER_API_KEY is set; V2 weights optional."""
-    from config import CHECKPOINT_FILENAME, DEVICE, MODEL_DIR
+    """Ready when OPENROUTER_API_KEY is set; local weights optional."""
+    from config import (
+        CHECKPOINT_FILENAME,
+        DERM_CLASSIFIER_PRIORITY,
+        DEVICE,
+        HAM_CHECKPOINT_FILENAME,
+        MODEL_DIR,
+    )
 
     key_ok = False
     for name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"):
@@ -365,16 +512,36 @@ def get_ready() -> dict[str, Any]:
             key_ok = True
             break
     prompt_ok = DERMAI_SYSTEM_PATH.is_file()
-    wpath = Path(MODEL_DIR) / CHECKPOINT_FILENAME
-    has_v2 = wpath.is_file()
+    ham_path = Path(MODEL_DIR) / HAM_CHECKPOINT_FILENAME
+    b4_path = Path(MODEL_DIR) / CHECKPOINT_FILENAME
+    has_ham = ham_path.is_file()
+    has_b4 = b4_path.is_file()
+    resolved_mode = "openrouter_vision_v1"
+    for tier in DERM_CLASSIFIER_PRIORITY:
+        if tier == "ham_v2" and has_ham:
+            resolved_mode = "efficientnet_v2m_ham7"
+            break
+        if tier == "b4" and has_b4:
+            resolved_mode = "efficientnet_b4"
+            break
+        if tier == "openrouter":
+            resolved_mode = "openrouter_vision_v1"
+            break
     ready = key_ok and prompt_ok
+    component_health = {
+        "ham_v2_weights_present": has_ham,
+        "b4_weights_present": has_b4,
+        "classifier_priority": list(DERM_CLASSIFIER_PRIORITY),
+        "resolved_score_mode": resolved_mode,
+    }
     return {
         "ready": ready,
-        "classifier": "loaded" if has_v2 else "openrouter_vision_v1",
+        "classifier": "loaded" if (has_ham or has_b4) else "openrouter_vision_v1",
         "device": DEVICE,
-        "mode": "efficientnet_b4" if has_v2 else "openrouter_vision_v1",
+        "mode": resolved_mode,
         "openrouter_configured": key_ok,
         "dermai_prompt_present": prompt_ok,
+        "component_health": component_health,
     }
 
 

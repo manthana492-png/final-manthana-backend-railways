@@ -1,13 +1,13 @@
 """
-Manthana — Lab Report Analyzer (V2 with Parrotlet-v-lite-4b)
+Manthana — Lab Report Analyzer (V2 with Google MedGemma-4B-IT)
 
 Architecture:
-1. Structured parsing (Parrotlet-v-lite-4b) → Extracts structured data from PDF/image
+1. Structured parsing (shared/medical_document_parser → google/medgemma-4b-it) → PDF/image/text
 2. Clinical interpretation (OpenRouter; SSOT config/cloud_inference.yaml role lab_report)
 3. Correlation-ready output → labs/structured fields for correlation_engine
 
 Benefits:
-- Better accuracy on scanned documents (OCR + vision model)
+- Better accuracy on scanned documents (vision + multimodal model)
 - Structured data enables correlation rules to fire properly
 - Single cloud LLM path (OpenRouter)
 - Handles both text PDFs and image-based reports
@@ -69,21 +69,27 @@ def _finalize_lab_output(output: dict) -> dict:
 try:
     import sys
     sys.path.insert(0, "/app/shared")
-    from medical_document_parser import parse_lab_report as _parrotlet_parse
-    from medical_document_parser import is_loaded as _parrotlet_loaded
+    from medical_document_parser import parse_lab_report as _medgemma_parse
 
-    PARROTV_AVAILABLE = True
+    MEDGEMMA_PARSER_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"Parrotlet-v parser not available: {e}")
-    PARROTV_AVAILABLE = False
-    _parrotlet_parse = None
-    _parrotlet_loaded = lambda: False
+    logger.warning("MedGemma medical_document_parser not available: %s", e)
+    MEDGEMMA_PARSER_AVAILABLE = False
+    _medgemma_parse = None
+
+# Back-compat for any code checking the old name
+PARROTV_AVAILABLE = MEDGEMMA_PARSER_AVAILABLE
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Configuration
 # ═════════════════════════════════════════════════════════════════════════════
 
-USE_STRUCTURED_PARSER = os.getenv("USE_PARROTV_PARSER", "auto").lower()
+# USE_MEDGEMMA_PARSER preferred; USE_PARROTV_PARSER still honored (legacy).
+USE_STRUCTURED_PARSER = (
+    os.getenv("USE_MEDGEMMA_PARSER") or os.getenv("USE_PARROTV_PARSER", "auto")
+).lower()
+
+MEDGEMMA_PARSER_MODEL_ID = "google/medgemma-4b-it"
 # Options: "always" | "never" | "auto"
 # "auto" = use if available, fallback to text-only if not
 
@@ -102,8 +108,7 @@ def extract_text(filepath: str) -> str:
         with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
     elif ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"):
-        # Images now supported via Parrotlet-v
-        if PARROTV_AVAILABLE and USE_STRUCTURED_PARSER != "never":
+        if MEDGEMMA_PARSER_AVAILABLE and USE_STRUCTURED_PARSER != "never":
             return "[IMAGE_USE_PARSER]"  # Signal to use vision parser
         else:
             return _extract_image_text_fallback(filepath)
@@ -129,8 +134,8 @@ def _extract_pdf_text(filepath: str) -> str:
 def _extract_image_text_fallback(filepath: str) -> str:
     """Fallback when image parsing not available."""
     raise ValueError(
-        "Image-based lab reports require Parrotlet-v-lite-4b parser. "
-        "Either enable it or upload a text-based PDF."
+        "Image-based lab reports require the MedGemma medical document parser "
+        f"({MEDGEMMA_PARSER_MODEL_ID}). Enable it or upload a text-based PDF."
     )
 
 
@@ -164,13 +169,16 @@ def analyze_lab_report(
     
     # Step 1: Structured parsing (if enabled and available)
     structured_result = None
-    if should_use_parser and PARROTV_AVAILABLE:
+    if should_use_parser and MEDGEMMA_PARSER_AVAILABLE and _medgemma_parse:
         try:
-            logger.info(f"Using Parrotlet-v parser for: {filepath}")
-            structured_result = _parrotlet_parse(filepath)
-            logger.info(f"Parser success: {structured_result.get('document_type', 'unknown')}")
+            logger.info("Using MedGemma parser for: %s", filepath)
+            structured_result = _medgemma_parse(filepath)
+            logger.info(
+                "Parser success: %s",
+                structured_result.get("document_type", "unknown"),
+            )
         except Exception as e:
-            logger.warning(f"Parrotlet-v parser failed: {e}. Falling back to text extraction.")
+            logger.warning("MedGemma parser failed: %s. Falling back to text extraction.", e)
             structured_result = None
     
     # Step 2: Text extraction (fallback or supplementary)
@@ -186,11 +194,11 @@ def analyze_lab_report(
 
     # Step 2b: Image uploads emit a parser token when vision path is required
     if raw_text.strip() == "[IMAGE_USE_PARSER]":
-        if PARROTV_AVAILABLE and _parrotlet_parse:
+        if MEDGEMMA_PARSER_AVAILABLE and _medgemma_parse:
             try:
-                structured_result = _parrotlet_parse(filepath)
+                structured_result = _medgemma_parse(filepath)
             except Exception as e:
-                logger.warning("Parrotlet parse after image token failed: %s", e)
+                logger.warning("MedGemma parse after image token failed: %s", e)
                 structured_result = None
         else:
             structured_result = None
@@ -256,12 +264,12 @@ def _should_use_parser(filepath: str, override: Optional[str]) -> bool:
     if USE_STRUCTURED_PARSER == "never":
         return False
     if USE_STRUCTURED_PARSER == "always":
-        return PARROTV_AVAILABLE
+        return MEDGEMMA_PARSER_AVAILABLE
     
     # Auto: use for images, optional for PDFs with sparse text
     ext = os.path.splitext(filepath)[1].lower()
     if ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"):
-        return PARROTV_AVAILABLE  # Required for images
+        return MEDGEMMA_PARSER_AVAILABLE  # Required for images
     
     # For PDFs, check if text extraction yields sparse results
     if ext == ".pdf":
@@ -270,12 +278,12 @@ def _should_use_parser(filepath: str, override: Optional[str]) -> bool:
             # If very little text, likely a scanned PDF
             if len(text.strip()) < 100:
                 logger.info("PDF appears scanned (sparse text). Will use vision parser.")
-                return PARROTV_AVAILABLE
+                return MEDGEMMA_PARSER_AVAILABLE
         except Exception:
             pass
     
     # Default: use if available for better structured data
-    return PARROTV_AVAILABLE
+    return MEDGEMMA_PARSER_AVAILABLE
 
 
 _INDIA_SYSTEM_STRUCTURED = """\
@@ -483,7 +491,7 @@ def _merge_outputs(
         output["flattened_labs"] = structured_result.get("flattened_labs", {})
         output["document_type"] = structured_result.get("document_type", "lab_report")
         output["parser_confidence"] = structured_result.get("confidence", 0)
-        output["parser_used"] = "parrotlet-v-lite-4b"
+        output["parser_used"] = MEDGEMMA_PARSER_MODEL_ID
         output["pages_processed"] = structured_result.get("pages_processed", 1)
     else:
         output["structured"] = {"raw_text": raw_text[:5000]}
@@ -544,7 +552,7 @@ def run_lab_report_pipeline_b64(
 
 
 def is_service_ready() -> dict:
-    """OPENROUTER_API_KEY required for readiness; Parrotlet optional."""
+    """OPENROUTER_API_KEY required for readiness; MedGemma parser optional."""
     or_ok = False
     for name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_2"):
         k = (os.environ.get(name) or "").strip()
@@ -553,7 +561,9 @@ def is_service_ready() -> dict:
             break
     return {
         "openrouter_configured": or_ok,
-        "parrotlet_available": PARROTV_AVAILABLE,
+        "medgemma_parser_available": MEDGEMMA_PARSER_AVAILABLE,
+        # Deprecated alias (same as medgemma_parser_available)
+        "parrotlet_available": MEDGEMMA_PARSER_AVAILABLE,
         "ready": or_ok,
-        "full_pipeline": or_ok and PARROTV_AVAILABLE,
+        "full_pipeline": or_ok and MEDGEMMA_PARSER_AVAILABLE,
     }

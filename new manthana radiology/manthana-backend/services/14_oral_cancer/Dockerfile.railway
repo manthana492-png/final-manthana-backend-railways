@@ -1,0 +1,36 @@
+# Production image: EfficientNet-B3 / UNI + OpenRouter oral_cancer role + llm_router stack.
+# CPU-first; no CUDA base required.
+#
+# Build context MUST be `this_studio`:
+#   cd this_studio
+#   docker build -f "new manthana radiology/manthana-backend/services/14_oral_cancer/Dockerfile.railway" -t manthana-oral-cancer .
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY ["packages/manthana-inference", "/app/packages/manthana-inference"]
+COPY ["config/cloud_inference.yaml", "/app/config/cloud_inference.yaml"]
+
+RUN pip install --no-cache-dir -U pip setuptools wheel \
+    && pip install --no-cache-dir -e /app/packages/manthana-inference \
+    && pip install --no-cache-dir "instructor>=1.0.0"
+
+COPY ["new manthana radiology/manthana-backend/services/14_oral_cancer/requirements.txt", "/tmp/oral-req.txt"]
+RUN pip install --no-cache-dir -r /tmp/oral-req.txt
+
+COPY ["new manthana radiology/manthana-backend/shared", "/app/shared"]
+COPY ["new manthana radiology/manthana-backend/services/14_oral_cancer", "/app"]
+
+ENV MANTHANA_LLM_REPO_ROOT=/app
+ENV PYTHONPATH=/app:/app/shared
+ENV CLOUD_INFERENCE_CONFIG_PATH=/app/config/cloud_inference.yaml
+ENV MODEL_DIR=/models
+
+EXPOSE 8014
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8014"]

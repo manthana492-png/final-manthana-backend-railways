@@ -1,7 +1,7 @@
 """
 Manthana — ECG Inference Pipeline
-Heuristic rhythm scoring (ecg_rhythm) + neurokit2 intervals. No HuggingFace ecg-fm / HeartLang.
-Optional narrative: OpenRouter vision/text (SSOT). Never raises.
+Heuristic rhythm scoring (ecg_rhythm) + neurokit2 intervals; narrative via OpenRouter narrative_ecg (SSOT prompts).
+No downloadable model weights — no Modal volume checkpoints for this service.
 """
 
 import base64
@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -38,6 +39,16 @@ from preprocessing.ecg_utils import (
     normalize_ecg,
 )
 from schemas import Finding
+
+from config import (
+    ECG_IMAGE_BLUR_VARIANCE_MIN,
+    ECG_IMAGE_MIN_SHORT_EDGE,
+    ECG_IMAGE_QUALITY_GATE,
+    ECG_PIPELINE_VERSION,
+)
+from digitiser_adapter import digitize_ecg_image_adapted
+from ecg_image_quality import assess_ecg_image_quality
+from patient_context_parser import format_ecg_patient_prompt_section
 
 logger = logging.getLogger("manthana.ecg")
 
@@ -78,6 +89,15 @@ _EMERGENCY_FINDING_COPY: dict[str, tuple[str, str]] = {
 def is_loaded() -> bool:
     """Pure CPU signal pipeline — always available after import."""
     return True
+
+
+def get_ecg_pipeline_status() -> dict[str, Any]:
+    """Health / debug: pipeline id (no DL weights)."""
+    return {
+        "ecg_pipeline_version": ECG_PIPELINE_VERSION,
+        "ecg_branch": "heuristic_neurokit2_openrouter",
+        "ecg_dl_weights": "none",
+    }
 
 
 def _digitizer_available() -> bool:
@@ -170,11 +190,12 @@ def _build_ecg_text_payload(
     patient_context: Optional[dict],
     structures: Optional[dict],
 ) -> str:
-    ctx = patient_context or {}
+    ctx = patient_context if isinstance(patient_context, dict) else {}
     st = structures or {}
     age = ctx.get("age", "")
     sex = ctx.get("sex", "")
     clin = ctx.get("clinical_history", ctx.get("history", ""))
+    structured_block = format_ecg_patient_prompt_section(ctx)
     payload = f"""ECG Analysis Results:
 Rhythm: {st.get('rhythm')}
 Heart Rate: {st.get('heart_rate_bpm')} bpm
@@ -185,9 +206,11 @@ Emergency flags: {emergency_flags}
 
 Top rhythm scores: {_top_3_rhythm_line(rhythm_scores)}
 
-Patient: {age}y {sex}, {clin}
+Patient summary: {age}y {sex}, {clin}
 
 Generate ECG report per system prompt format."""
+    if structured_block:
+        payload += "\n\n" + structured_block
     if st.get("input_type") == "image":
         payload += (
             "\n\nNote: QTc estimated from digitised image. "
@@ -420,12 +443,25 @@ def run_ecg_pipeline(
         )
 
     models_used: list[str] = []
+    timing_ms: dict[str, float] = {}
+    image_quality: dict[str, Any] = {}
 
     if input_type == "image":
+        if ECG_IMAGE_QUALITY_GATE:
+            image_quality = assess_ecg_image_quality(
+                filepath,
+                min_short_edge=ECG_IMAGE_MIN_SHORT_EDGE,
+                blur_variance_min=ECG_IMAGE_BLUR_VARIANCE_MIN,
+            )
         logger.info(f"[{job_id}] Digitizing ECG photo...")
+        t0 = time.perf_counter()
         signal, sample_rate = _digitize_ecg_photo(filepath)
-        if _digitizer_available():
-            models_used.append("ecg-digitiser")
+        timing_ms["digitize_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        ext_used = os.getenv("ECG_DIGITISER_REPO_ROOT", "").strip()
+        if ext_used and os.path.isdir(ext_used):
+            models_used.append("ecg-digitiser-external")
+        elif _digitizer_available():
+            models_used.append("ecg-digitiser-opencv")
         else:
             models_used.append("ecg-signal-extractor")
             logger.warning(
@@ -443,8 +479,10 @@ def run_ecg_pipeline(
             "Supported: JPEG/PNG photo, CSV, EDF, DICOM-ECG"
         )
 
+    t_norm = time.perf_counter()
     signal = normalize_ecg(signal, target_rate=500, current_rate=sample_rate)
     sample_rate = 500.0
+    timing_ms["normalize_ms"] = round((time.perf_counter() - t_norm) * 1000.0, 2)
 
     fm_scores = rhythm_scores_from_signal(signal, 500.0)
     hl_scores = rhythm_scores_secondary(signal, 500.0)
@@ -456,6 +494,12 @@ def run_ecg_pipeline(
     impression = _build_impression(rhythm_scores, parameters, significant)
     structures = _enrich_structures(parameters, rhythm_scores, significant, input_type=input_type)
     structures = dict(structures)
+    structures["ecg_pipeline_version"] = ECG_PIPELINE_VERSION
+    structures["ecg_timing_ms"] = timing_ms
+    structures["ecg_founder_scores"] = {}
+    structures["ecg_image_quality"] = image_quality
+    if image_quality.get("warnings"):
+        structures["ecg_image_quality_warnings"] = image_quality["warnings"]
     if parameters.get("method") == "neurokit2" and "neurokit2" not in models_used:
         models_used.append("neurokit2")
 
@@ -497,9 +541,7 @@ def run_ecg_pipeline(
 
 def _digitize_ecg_photo(filepath: str) -> tuple:
     try:
-        from digitizer import digitize_ecg_image
-
-        return digitize_ecg_image(filepath)
+        return digitize_ecg_image_adapted(filepath, target_rate=500)
     except ImportError:
         logger.warning("ECG Digitiser not available. Using simplified extraction.")
         return _simplified_ecg_extract(filepath)

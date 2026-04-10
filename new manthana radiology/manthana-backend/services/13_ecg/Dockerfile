@@ -1,3 +1,4 @@
+# Minimal local image (shared mounted by compose). For OpenRouter narrative_ecg in production use Dockerfile.railway (context=this_studio).
 FROM python:3.11-slim
 
 # System dependencies for OpenCV

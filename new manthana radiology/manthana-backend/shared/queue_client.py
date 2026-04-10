@@ -1,6 +1,9 @@
 """
-Manthana — Redis Queue Client
+Manthana — Redis Queue Client (optional)
 Submit and poll async analysis jobs.
+
+Default: queue disabled — no Redis required (use third-party job store or sync /analyze only).
+Enable with USE_REDIS_QUEUE=1 and REDIS_URL; run Redis via docker compose --profile queue.
 """
 
 import os
@@ -15,7 +18,13 @@ from rq.job import Job
 
 logger = logging.getLogger("manthana.queue_client")
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+REDIS_URL = (os.getenv("REDIS_URL") or "").strip() or "redis://redis:6379/0"
+
+
+def redis_queue_enabled() -> bool:
+    v = (os.getenv("USE_REDIS_QUEUE") or "").lower().strip()
+    return v in ("1", "true", "yes")
+
 
 _redis_conn = None
 _queue = None
@@ -23,6 +32,10 @@ _queue = None
 
 def get_redis():
     """Get or create Redis connection."""
+    if not redis_queue_enabled():
+        raise RuntimeError(
+            "Redis queue is disabled (set USE_REDIS_QUEUE=1 and a reachable REDIS_URL)."
+        )
     global _redis_conn
     if _redis_conn is None:
         _redis_conn = redis.from_url(REDIS_URL)
@@ -49,6 +62,9 @@ def submit_job(func, *args, job_id: str = None,
     Returns:
         job_id: The unique job identifier for status polling
     """
+    if not redis_queue_enabled():
+        raise RuntimeError("Redis queue disabled; set USE_REDIS_QUEUE=1 to submit jobs.")
+
     if job_id is None:
         job_id = str(uuid.uuid4())
 
@@ -72,6 +88,13 @@ def get_job_status(job_id: str) -> dict:
     Returns:
         dict with keys: status, progress, result, error
     """
+    if not redis_queue_enabled():
+        return {
+            "job_id": job_id,
+            "status": "disabled",
+            "error": "Job queue not enabled (USE_REDIS_QUEUE unset or 0).",
+            "result": None,
+        }
     try:
         job = Job.fetch(job_id, connection=get_redis())
     except Exception:
@@ -113,4 +136,6 @@ def _map_status(rq_status: str) -> str:
 
 def get_queue_length() -> int:
     """Get number of jobs waiting in queue."""
+    if not redis_queue_enabled():
+        return 0
     return len(get_queue())

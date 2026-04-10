@@ -1,0 +1,2 @@
+# Install locally to deploy: pip install -r modal_requirements.txt
+modal>=0.64.0

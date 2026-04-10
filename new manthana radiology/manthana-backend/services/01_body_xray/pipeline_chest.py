@@ -58,11 +58,12 @@ def run_chest_pipeline(filepath: str, job_id: str) -> dict:
     )
 
     over_30 = {k: float(v) for k, v in pathology_scores.items() if v > 0.3}
+    heatmap_type = "none" if heatmap_url is None else "synthetic"
     structures: dict = {
         "pathology_fractions": over_30,
         "display_lines": [f"{k}: {v:.1%}" for k, v in pathology_scores.items() if v > 0.3],
         "narrative_report": "",
-        "heatmap_type": "synthetic",
+        "heatmap_type": heatmap_type,
         "runtime": get_txrv_runtime_stats(),
     }
 

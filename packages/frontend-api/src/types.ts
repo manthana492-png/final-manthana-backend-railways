@@ -108,6 +108,22 @@ export type ScanStage =
   | "complete"
   | "error";
 
+/** One image in the multi-scan analyse UI (`useAnalysis`). */
+export interface ImageScan {
+  id: string;
+  file: File;
+  url: string;
+  stage: ScanStage;
+  detectedModality: string | null;
+  result: AnalysisResponse | null;
+  /** User-facing error when `stage` is `"error"`. */
+  error?: string;
+  clinicalNotes?: string;
+  patientContext?: Record<string, unknown>;
+  /** Gateway modality override (e.g. chest_ct while UI shows ct). */
+  analyzeModalityForApi?: string;
+}
+
 export interface Modality {
   id: string;
   label: string;

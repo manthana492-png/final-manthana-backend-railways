@@ -3,6 +3,7 @@ Manthana — CT Brain (NCCT) head CT service.
 """
 import json
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -17,6 +18,7 @@ for _shared in (Path("/app/shared"), _root / "shared"):
         break
 
 from config import PORT, SERVICE_NAME
+from service_upload_prep import prepare_upload_for_pipeline
 
 app = FastAPI(title=f"Manthana — {SERVICE_NAME}")
 
@@ -83,16 +85,26 @@ async def analyze(
                 patient_ctx = parsed
         except json.JSONDecodeError:
             patient_ctx = {}
+    cleanup_dirs: list[str] = []
     try:
+        if series_dir and os.path.isdir(series_dir):
+            pipeline_path = fp
+        else:
+            pipeline_path, cleanup_dirs = prepare_upload_for_pipeline(fp, file.filename, job_id)
         result = run_pipeline(
-            fp,
+            pipeline_path,
             job_id,
             series_dir=series_dir or "",
             source_modality=source_modality or "",
             patient_context=patient_ctx or None,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+    finally:
+        for d in cleanup_dirs:
+            shutil.rmtree(d, ignore_errors=True)
     result["processing_time_sec"] = round(time.time() - start, 2)
     result["job_id"] = job_id
     return AnalysisResponse(**result).model_dump()

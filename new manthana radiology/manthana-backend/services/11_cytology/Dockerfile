@@ -1,3 +1,4 @@
+# Minimal service-only image. For OpenRouter cytology narrative + full repo layout use Dockerfile.railway (context=this_studio).
 FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 # OpenSlide: libopenslide for .svs, .ndpi, and other OpenSlide-backed formats.
 # (.czi is not OpenSlide-native—use conversion or a CZI reader.) openslide-bin helps the Python binding locate libs.

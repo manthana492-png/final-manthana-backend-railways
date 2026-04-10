@@ -7,6 +7,8 @@ Dual-strategy heatmap generation:
 Both produce a standard PNG overlay image.
 """
 
+from __future__ import annotations
+
 import os
 import logging
 import numpy as np
@@ -16,6 +18,20 @@ logger = logging.getLogger("manthana.heatmap")
 
 HEATMAP_DIR = os.getenv("HEATMAP_DIR", "/tmp/manthana_uploads/heatmaps")
 os.makedirs(HEATMAP_DIR, exist_ok=True)
+
+
+def _public_heatmap_url_enabled() -> bool:
+    """
+    When False, skip writing PNGs and return None so clients do not GET /heatmaps/... on a
+    host that cannot see this container (e.g. Railway gateway + Modal body_xray).
+    Set XRAY_HEATMAP_URL_MODE=none on Modal images; omit or use path/url for Docker + shared volume.
+    """
+    mode = os.getenv("XRAY_HEATMAP_URL_MODE", "").strip().lower()
+    if mode in ("none", "null", "off", "0", "false"):
+        return False
+    if mode in ("path", "url", "file", "on", "1", "true"):
+        return True
+    return True
 
 
 # ═══ ANATOMICAL REGION MAPPING ═══
@@ -280,12 +296,17 @@ def generate_heatmap(
     model=None,
     target_layer=None,
     input_tensor=None,
-) -> str:
+) -> str | None:
     """
     Unified heatmap generator — tries real Grad-CAM first, falls back to synthetic.
-    
-    Returns: relative URL path (e.g., "/heatmaps/{job_id}_heatmap.png")
+
+    Returns: relative URL path (e.g. "/heatmaps/{job_id}_heatmap.png"), empty string on
+    generation failure, or None when public URLs are disabled (split Modal + gateway deploy).
     """
+    if not _public_heatmap_url_enabled():
+        logger.info("[%s] Heatmap URL disabled (XRAY_HEATMAP_URL_MODE / split deploy)", job_id)
+        return None
+
     # Strategy 1: Try real Grad-CAM if model is provided
     if model is not None and target_layer is not None and input_tensor is not None:
         result = generate_gradcam_heatmap(

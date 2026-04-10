@@ -363,6 +363,19 @@ async def analyze(
 
     canon = _canonical_modality(modality)
 
+    # Premium modalities (VISTA-3D CT brain): require paid tier on gateway (do not trust UI alone).
+    _PREMIUM_MODALITIES = frozenset({"ct_brain_vista"})
+    if canon in _PREMIUM_MODALITIES:
+        sub_tier = (request.headers.get("X-Subscription-Tier") or "free").strip().lower()
+        if sub_tier not in ("pro", "proplus", "premium", "enterprise"):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"'{modality}' requires Pro or higher subscription. "
+                    f"Current tier: {sub_tier}."
+                ),
+            )
+
     # MSK MRI — no downstream Docker service (v1)
     if canon == "unsupported_mr_msk":
         import sys as _sys
@@ -434,6 +447,8 @@ async def analyze(
     # Route to correct service
     try:
         service_url = route_to_service(modality)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

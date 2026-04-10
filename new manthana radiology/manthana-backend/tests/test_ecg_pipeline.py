@@ -93,3 +93,47 @@ def test_correlation_ecg_xray_rules_registered():
     assert "ECG LVH with CXR Cardiomegaly" in names
     assert "ECG Atrial Fibrillation with CXR Cardiomegaly" in names
     assert "ECG LBBB with CXR Cardiomegaly" in names
+
+
+def test_founder_merge_maps_afib_substring():
+    from ecg_rhythm import RHYTHM_KEYS
+    from founder_merge import merge_founder_into_rhythm_scores
+
+    heuristic = {k: 0.15 for k in RHYTHM_KEYS}
+    founder = {"paroxysmal_atrial_fibrillation": 0.9}
+    out = merge_founder_into_rhythm_scores(founder, heuristic)
+    assert out["atrial_fibrillation"] >= 0.85
+
+
+def test_ecg_founder_infer_json_checkpoint(tmp_path, monkeypatch):
+    import json
+    import os
+
+    p = tmp_path / "scores.json"
+    p.write_text(
+        json.dumps({"atrial_fibrillation": 0.88, "noise": "x"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ECG_FOUNDER_CHECKPOINT", str(p))
+    monkeypatch.delenv("MODEL_DIR", raising=False)
+
+    from ecg_founder_infer import predict_12lead
+
+    import numpy as np
+
+    sig = np.zeros((12, 500), dtype=np.float32)
+    out = predict_12lead(sig, 500.0, str(tmp_path))
+    assert out is not None
+    assert out.get("atrial_fibrillation") == pytest.approx(0.88, abs=0.01)
+
+
+def test_ecg_image_quality_flags_tiny_image(tmp_path):
+    from PIL import Image
+
+    from ecg_image_quality import assess_ecg_image_quality
+
+    img_path = tmp_path / "tiny.jpg"
+    Image.new("RGB", (32, 32), color="white").save(img_path, "JPEG")
+    q = assess_ecg_image_quality(str(img_path), min_short_edge=480, blur_variance_min=15.0)
+    assert q["ok"] is False
+    assert q["warnings"]

@@ -2,7 +2,8 @@
 Manthana — Oral Cancer Screening Service
 Clinical intraoral photos, phone images, and optional histopathology crops (UNI path).
 
-Weights are optional: EfficientNet-B3 checkpoint, optional V2-M weights, UNI + head, then Kimi/Claude vision.
+Weights are optional: EfficientNet-V2-M (default before B3 when both exist), EfficientNet-B3 checkpoint, UNI + head;
+OpenRouter (role oral_cancer, SSOT cloud_inference.yaml) for vision JSON and narrative when needed.
 """
 
 import json
@@ -39,13 +40,20 @@ app = FastAPI(title=f"Manthana — {SERVICE_NAME}")
 @app.get("/health")
 async def health():
     status = get_loaded_status()
+    gpu_ok = False
+    try:
+        import torch
+
+        gpu_ok = bool(torch.cuda.is_available())
+    except Exception:
+        pass
     return {
         "service": SERVICE_NAME,
         "status": "ok",
         "models_loaded": status["ready"],
         "component_health": status,
         "ready": status["ready"],
-        "gpu_available": False,
+        "gpu_available": gpu_ok,
         "version": "1.0.0",
     }
 

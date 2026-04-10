@@ -18,6 +18,7 @@ networks:
 services:
   redis:
     image: redis:7-alpine
+    profiles: ["queue"]
     ports: ["6379:6379"]
     volumes: [redis_data:/data]
     networks: [manthana]
@@ -28,9 +29,10 @@ services:
       timeout: 3s
       retries: 3
 
-  # ── PACS (Orthanc DICOM Server) ──
+  # ── PACS (Orthanc DICOM Server) — docker compose --profile pacs up ──
   orthanc:
     image: orthancteam/orthanc:24.12.2
+    profiles: ["pacs"]
     ports:
       - "${PORT_ORTHANC_HTTP:-8042}:8042"
       - "${PORT_ORTHANC_DICOM:-4242}:4242"
@@ -50,9 +52,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── PACS Database (PostgreSQL for Orthanc index) ──
   pacs_db:
     image: postgres:16-alpine
+    profiles: ["pacs"]
     environment:
       POSTGRES_DB: orthanc
       POSTGRES_USER: orthanc
@@ -66,9 +68,9 @@ services:
       timeout: 3s
       retries: 3
 
-  # ── PACS Bridge (Gateway ↔ Orthanc DICOMweb proxy) ──
   pacs_bridge:
     build: ./services/pacs_bridge
+    profiles: ["pacs"]
     ports: ["${PORT_PACS_BRIDGE:-8030}:8030"]
     env_file: .env
     volumes:
@@ -94,7 +96,6 @@ services:
       - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
       - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
     volumes: [upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
-    depends_on: {redis: {condition: service_healthy}}
     networks: [manthana]
     restart: unless-stopped
 
@@ -112,8 +113,12 @@ services:
 
   queue_api:
     build: ./services/queue
+    profiles: ["queue"]
     ports: ["${PORT_QUEUE_API:-8021}:8021"]
     env_file: .env
+    environment:
+      USE_REDIS_QUEUE: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes: [./shared:/app/shared]
     depends_on: {redis: {condition: service_healthy}}
     networks: [manthana]
@@ -121,9 +126,13 @@ services:
 
   queue_worker:
     build: ./services/queue
+    profiles: ["queue"]
     command: python worker.py
     env_file: .env
-    environment: [DEVICE=cpu]
+    environment:
+      DEVICE: cpu
+      USE_REDIS_QUEUE: "1"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
     depends_on: {redis: {condition: service_healthy}}
     networks: [manthana]
@@ -175,15 +184,18 @@ services:
     restart: unless-stopped
 
   pathology:
-    build: ./services/05_pathology
+    build:
+      context: ../..
+      dockerfile: new manthana radiology/manthana-backend/services/05_pathology/Dockerfile.railway
     ports: ["${PORT_PATHOLOGY:-8005}:8005"]
     env_file: .env
     environment:
-      - DEVICE=cpu
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
-      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
-    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+      DEVICE: cpu
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads]
     networks: [manthana]
     restart: unless-stopped
 
@@ -234,77 +246,113 @@ services:
     restart: unless-stopped
 
   cytology:
-    build: ./services/11_cytology
+    build:
+      context: ../..
+      dockerfile: new manthana radiology/manthana-backend/services/11_cytology/Dockerfile.railway
     ports: ["${PORT_CYTOLOGY:-8011}:8011"]
     env_file: .env
     environment:
-      - DEVICE=cpu
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
-      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
-    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+      DEVICE: cpu
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads]
     networks: [manthana]
     restart: unless-stopped
 
   mammography:
-    build: ./services/12_mammography
+    build:
+      context: ../..
+      dockerfile: new manthana radiology/manthana-backend/services/12_mammography/Dockerfile.railway
     ports: ["${PORT_MAMMOGRAPHY:-8012}:8012"]
     env_file: .env
     environment:
-      - DEVICE=cpu
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
-      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
-      - HF_TOKEN=${HF_TOKEN}
-      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}
-    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+      DEVICE: cpu
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      HF_TOKEN: ${HF_TOKEN}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN}
+      MIRAI_HF_REPO: ${MIRAI_HF_REPO:-Lab-Rasool/Mirai}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads]
     networks: [manthana]
     restart: unless-stopped
 
   ecg:
-    build: ./services/13_ecg
+    build:
+      context: ../..
+      dockerfile: new manthana radiology/manthana-backend/services/13_ecg/Dockerfile.railway
     ports: ["${PORT_ECG:-8013}:8013"]
     env_file: .env
-    environment: [DEVICE=cpu]
-    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    environment:
+      DEVICE: cpu
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads]
     networks: [manthana]
     restart: unless-stopped
 
   oral_cancer:
-    build: ./services/14_oral_cancer
+    build:
+      context: ../..
+      dockerfile: new manthana radiology/manthana-backend/services/14_oral_cancer/Dockerfile.railway
     ports: ["${PORT_ORAL_CANCER:-8014}:8014"]
     env_file: .env
-    environment: [DEVICE=cpu]
-    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    environment:
+      DEVICE: cpu
+      ORAL_CANCER_ENABLED: ${ORAL_CANCER_ENABLED:-true}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+      UNI_MODEL_ID: ${UNI_MODEL_ID:-MahmoodLab/UNI}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8014/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
     networks: [manthana]
     restart: unless-stopped
 
   lab_report:
-    build: ./services/15_lab_report
+    build:
+      context: ../..
+      dockerfile: new manthana radiology/manthana-backend/services/15_lab_report/Dockerfile.railway
     ports: ["${PORT_LAB_REPORT:-8015}:8015"]
     env_file: .env
-    environment: [DEVICE=cpu]
-    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+    environment:
+      DEVICE: cpu
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8015/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
     networks: [manthana]
     restart: unless-stopped
 
   dermatology:
-    build: ./services/16_dermatology
+    build:
+      context: ../..
+      dockerfile: new manthana radiology/manthana-backend/services/16_dermatology/Dockerfile.railway
     ports: ["${PORT_DERMATOLOGY:-8016}:8016"]
     env_file: .env
     environment:
-      - DEVICE=cpu
-      - MODEL_DIR=/models
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_API_KEY_2=${OPENROUTER_API_KEY_2:-}
-      - CLOUD_INFERENCE_CONFIG_PATH=${CLOUD_INFERENCE_CONFIG_PATH:-}
-    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads, ./shared:/app/shared]
+      DEVICE: cpu
+      MODEL_DIR: /models
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_2: ${OPENROUTER_API_KEY_2:-}
+      CLOUD_INFERENCE_CONFIG_PATH: ${CLOUD_INFERENCE_CONFIG_PATH:-}
+      DERM_MAX_UPLOAD_BYTES: ${DERM_MAX_UPLOAD_BYTES:-15728640}
+      DERM_MAX_IMAGE_PIXELS: ${DERM_MAX_IMAGE_PIXELS:-36000000}
+    volumes: [model_cache:/models, upload_data:/tmp/manthana_uploads]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8016/health')"]
       interval: 30s

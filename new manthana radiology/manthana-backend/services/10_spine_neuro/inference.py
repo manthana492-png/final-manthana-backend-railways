@@ -39,7 +39,17 @@ try:
 except ImportError:
     pass
 
-from disclaimer import DISCLAIMER
+from disclaimer import DISCLAIMER, FILM_PHOTO_DISCLAIMER_ADDENDUM
+from film_photo_reporting import (
+    FILM_PHOTO_NARRATIVE_PREFIX,
+    apply_film_photo_pathology_scores,
+    attach_film_meta_to_structures,
+    cap_confidence_for_film,
+    is_film_photo_meta,
+    merge_disclaimer_with_film,
+)
+from fracture_grading import grade_vertebral_fractures
+from opportunistic_osteoporosis import compute_l1_hu_bmd
 from preprocessing.ct_loader import is_degraded_single_slice, load_ct_volume
 from schemas import Finding
 from totalseg_runner import (
@@ -111,6 +121,7 @@ def _build_clinical_spine_structures(
     patient_context: dict[str, Any],
     volume: np.ndarray,
     totseg_limitation_note: str = "",
+    fracture_grading: dict | None = None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     """Heuristic clinical structure block + scores (TotalSeg augments; never fabricates labels as diagnosis)."""
     ctx_txt = _clinical_blob(
@@ -217,14 +228,31 @@ def _build_clinical_spine_structures(
         else:
             spondy = "grade_I_L4-L5"
 
+    # Use real fracture grading if available
     fracture = "none"
-    if "burst" in ctx_txt:
-        fracture = "burst_L1"
-    elif "wedge" in ctx_txt or "compression fracture" in ctx_txt:
-        fracture = "wedge_L2"
+    highest_genant = 0
+    if fracture_grading and fracture_grading.get("available"):
+        highest_genant = fracture_grading.get("highest_grade", 0)
+        any_frac = fracture_grading.get("any_fracture", False)
+        if any_frac or highest_genant >= 1:
+            # Find the highest grade fracture level
+            worst = None
+            for v in fracture_grading.get("vertebrae", []):
+                if v.get("genant_grade", 0) > (worst.get("genant_grade", 0) if worst else 0):
+                    worst = v
+            if worst:
+                frac_type = worst.get("genant_type", "compression")
+                fracture = f"{frac_type}_{worst['level']}_Genant{worst['genant_grade']}"
+        fracture_conf = 0.7 if any_frac or highest_genant >= 1 else 0.3
+    else:
+        # Fall back to clinical context heuristics
+        if "burst" in ctx_txt:
+            fracture = "burst_L1"
+        elif "wedge" in ctx_txt or "compression fracture" in ctx_txt:
+            fracture = "wedge_L2"
+        fracture_conf = 0.55 if fracture != "none" else min(0.25, stenosis_sev * 0.3)
 
     disc_deg = min(1.0, 0.2 + stenosis_sev * 0.5 + (0.15 if degraded else 0.0))
-    fracture_conf = 0.55 if fracture != "none" else min(0.25, stenosis_sev * 0.3)
 
     limitation_note = ""
     if degraded:
@@ -251,7 +279,7 @@ def _build_clinical_spine_structures(
         "spondylolisthesis": spondy,
         "fracture": fracture,
         "pott_disease_signs": pott_signs,
-        "opll_signs": False,
+        "opll_signs": None,  # OPLL detection not implemented; marked as unknown vs hardcoded False
         "limitation_note": limitation_note,
         "narrative_report": "",
     }
@@ -278,6 +306,9 @@ def _spine_narrative_openrouter(
     structures: dict[str, Any],
     pathology_scores: dict[str, float],
     patient_context: dict[str, Any],
+    *,
+    film_photo: bool = False,
+    image_b64_list: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     policy = _spine_narrative_policy()
     tags: list[str] = []
@@ -295,7 +326,9 @@ def _spine_narrative_openrouter(
     sex = patient_context.get("sex", "")
     clin = patient_context.get("clinical_history", patient_context.get("history", ""))
     hosp = patient_context.get("hospital", "India")
-    user_text = f"""Spine MRI Analysis Results:
+    is_mri = structures.get('imaging_modality', 'MRI').upper() == 'MRI'
+    modality_label = "Spine MRI" if is_mri else "Spine CT"
+    user_text = f"""{modality_label} Analysis Results:
 Vertebral levels assessed: {structures.get('vertebral_levels_assessed')}
 Disc heights: {structures.get('disc_heights')}
 Cord signal: {structures.get('cord_signal')}
@@ -311,22 +344,38 @@ Patient: {age}y {sex}
 Clinical: {clin}
 Reporting centre: {hosp}
 
-Generate a structured spine MRI report following the system prompt.
+Generate a structured {modality_label} report following the system prompt.
 Include: disc pathology by level, cord status, Pott's assessment,
 India-specific differentials (TB spine vs other), management."""
     system = (
         "You are a senior neuroradiologist writing structured spine MRI/CT reports "
         "for Indian clinical settings. Be precise; flag uncertainty where input is limited."
     )
+    if film_photo:
+        system = FILM_PHOTO_NARRATIVE_PREFIX + system
     try:
         from llm_router import llm_router
 
-        out = llm_router.complete_for_role(
-            "spine",
-            system,
-            user_text,
-            max_tokens=2000,
-        )
+        # For film-photo mode with multi-image vision
+        has_vision_images = film_photo and image_b64_list and len(image_b64_list) > 0
+        
+        if has_vision_images:
+            logger.info("Spine narrative: using multi-image vision with %d film-photo slices", len(image_b64_list))
+            out = llm_router.complete_for_role(
+                "spine",
+                system,
+                user_text,
+                image_b64_list=image_b64_list,
+                image_mime="image/png",
+                max_tokens=2400,
+            )
+        else:
+            out = llm_router.complete_for_role(
+                "spine",
+                system,
+                user_text,
+                max_tokens=2000,
+            )
         txt = (out.get("content") or "").strip()
         if txt:
             tags.append("OpenRouter-narrative-Spine")
@@ -405,71 +454,119 @@ def run_pipeline(
     job_id: str,
     series_dir: str = "",
     patient_context: dict[str, Any] | None = None,
-    claude_client: Any = None,
 ) -> dict:
+    """Run spine/neuro pipeline. claude_client parameter removed (was dead)."""
     logger.info(f"[{job_id}] Running spine/neuro pipeline...")
     pctx = patient_context or {}
-    volume, _meta, _loaded = load_ct_volume(filepath, series_dir=series_dir or None)
+    volume, meta, _loaded = load_ct_volume(filepath, series_dir=series_dir or None)
+    meta = meta if isinstance(meta, dict) else {}
+    film_photo = is_film_photo_meta(meta)
     degraded = is_degraded_single_slice(volume)
     is_mri = detect_is_mri(filepath, series_dir or None)
+    if film_photo:
+        hint = str(pctx.get("film_imaging_modality") or pctx.get("imaging_modality") or "").upper()
+        is_mri = hint in ("MR", "MRI", "MRI_SPINE")
     tot_task = "vertebrae_mr" if is_mri else "vertebrae_body"
 
     tot_result: dict = {}
     totseg_limitation_note = ""
-    try:
-        inp = filepath if filepath and os.path.isfile(filepath) else volume
-        # vertebrae_body does not support --fast; vertebrae_mr does (see TotalSegmentator CLI).
-        use_fast = tot_task == "vertebrae_mr"
-        dev = os.getenv("TOTALSEG_DEVICE") or os.getenv("DEVICE", "cpu")
-        tot_result = run_totalseg(
-            inp,
-            task=tot_task,
-            fast=use_fast,
-            device=dev,
+    if not film_photo:
+        try:
+            inp = filepath if filepath and os.path.isfile(filepath) else volume
+            # vertebrae_body does not support --fast; vertebrae_mr does (see TotalSegmentator CLI).
+            use_fast = tot_task == "vertebrae_mr"
+            dev = os.getenv("TOTALSEG_DEVICE") or os.getenv("DEVICE", "cpu")
+            tot_result = run_totalseg(
+                inp,
+                task=tot_task,
+                fast=use_fast,
+                device=dev,
+            )
+        except (SystemExit, Exception) as e:
+            err_msg = str(e)
+            if isinstance(e, SystemExit) or "license" in err_msg.lower():
+                totseg_limitation_note = (
+                    "TotalSegmentator vertebrae model unavailable "
+                    "(license or weights missing, or CLI exited). "
+                    "Clinical scores derived from heuristic analysis only. "
+                    "For full vertebral segmentation, obtain an academic/commercial TotalSegmentator "
+                    f"license and run the appropriate task (e.g. {tot_task}) per upstream documentation."
+                )
+                logger.warning(
+                    "TotalSeg SystemExit or license issue (%s): %s — using heuristic fallback",
+                    tot_task,
+                    err_msg,
+                )
+            else:
+                totseg_limitation_note = f"TotalSegmentator error: {err_msg}"
+                logger.error("TotalSeg unexpected error (%s): %s", tot_task, err_msg, exc_info=True)
+            tot_result = {"structure_names": [], "output_dir": "", "volumes_cm3": {}}
+    else:
+        logger.info("Skipping TotalSegmentator for film_photo spine input")
+        totseg_limitation_note = (
+            "Film photo batch — TotalSegmentator skipped; segmentation is not valid on "
+            "phone-photo reconstructed stacks."
         )
-    except (SystemExit, Exception) as e:
-        err_msg = str(e)
-        if isinstance(e, SystemExit) or "license" in err_msg.lower():
-            totseg_limitation_note = (
-                "TotalSegmentator vertebrae model unavailable "
-                "(license or weights missing, or CLI exited). "
-                "Clinical scores derived from heuristic analysis only. "
-                "For full vertebral segmentation, obtain an academic/commercial TotalSegmentator "
-                f"license and run the appropriate task (e.g. {tot_task}) per upstream documentation."
-            )
-            logger.warning(
-                "TotalSeg SystemExit or license issue (%s): %s — using heuristic fallback",
-                tot_task,
-                err_msg,
-            )
-        else:
-            totseg_limitation_note = f"TotalSegmentator error: {err_msg}"
-            logger.error("TotalSeg unexpected error (%s): %s", tot_task, err_msg, exc_info=True)
         tot_result = {"structure_names": [], "output_dir": "", "volumes_cm3": {}}
 
     out_dir = tot_result.get("output_dir") or ""
     vertebrae = structure_list_from_result(tot_result)
     volumes_cm3 = tot_result.get("volumes_cm3") or {}
+    mask_paths = tot_result.get("mask_paths") or {}
 
     if not vertebrae:
         vertebrae = []
 
-    heights = _vertebral_heights(volume, max(len(vertebrae), 1))
-
     pathology_scores: dict = {}
     for k, v in volumes_cm3.items():
         pathology_scores[k] = v
+
+    # Run opportunistic osteoporosis screening (L1 HU)
+    l1_bmd = compute_l1_hu_bmd(volume, mask_paths, meta)
+    if l1_bmd.get("available"):
+        for key in ["l1_hu_mean", "bone_density_category"]:
+            if l1_bmd.get(key) is not None:
+                pathology_scores[key] = l1_bmd[key]
+
+    # Run fracture grading with real mask-derived heights
+    fracture_grading = grade_vertebral_fractures(volume, mask_paths, meta)
+
+    # Build heights list from fracture grading results
+    if fracture_grading.get("available") and fracture_grading.get("vertebrae"):
+        heights_from_masks = []
+        for v in fracture_grading.get("vertebrae", []):
+            h = v.get("height_mm")
+            if h is not None:
+                heights_from_masks.append(h)
+        heights = heights_from_masks if heights_from_masks else _vertebral_heights(volume, max(len(vertebrae), 1))
+
+        pathology_scores["fracture_grading_available"] = 1.0
+        pathology_scores["highest_genant_grade"] = fracture_grading.get("highest_grade", 0)
+        pathology_scores["any_vertebral_fracture"] = 1.0 if fracture_grading.get("any_fracture") else 0.0
+        for v in fracture_grading.get("vertebrae", []):
+            level = v.get("level")
+            if level:
+                pathology_scores[f"{level}_genant_grade"] = v.get("genant_grade", 0)
+                pathology_scores[f"{level}_height_mm"] = v.get("height_mm")
+    else:
+        heights = _vertebral_heights(volume, max(len(vertebrae), 1))
+        pathology_scores["fracture_grading_available"] = 0.0
+
     for i, vb in enumerate(vertebrae[:12]):
         pathology_scores[f"{vb}_height_mm"] = heights[i] if i < len(heights) else 0.0
 
     findings = _build_spine_findings(
-        vertebrae, heights, degraded, volumes_cm3, is_mri, tot_task
+        vertebrae, heights, degraded, volumes_cm3, is_mri, tot_task, film_photo=film_photo
     )
 
     seg_ok = bool(vertebrae or volumes_cm3)
     models_used: list[str] = []
     if seg_ok:
         models_used.append("TotalSegmentator-vertebrae")
+        if l1_bmd.get("available"):
+            models_used.append("Opportunistic-BMD-L1")
+        if fracture_grading.get("available"):
+            models_used.append("Vertebral-Fracture-Grading")
     else:
         models_used.append("heuristic-spine")
     impression = (
@@ -491,6 +588,7 @@ def run_pipeline(
         pctx,
         volume,
         totseg_limitation_note=totseg_limitation_note,
+        fracture_grading=fracture_grading,
     )
     merged_scores = dict(pathology_scores)
     for k, v in clinical_scores.items():
@@ -501,19 +599,45 @@ def run_pipeline(
         "segment_names": vertebrae,
         "totalseg_task": tot_task,
         "mri_detected": is_mri,
+        "imaging_modality": "MRI" if is_mri else "CT",
         "algorithm_version": {
             "totalsegmentator": get_totalseg_version(),
             "comp2comp_git_sha": os.getenv("COMP2COMP_GIT_SHA", "unknown"),
             "pipeline_version": PIPELINE_VERSION,
         },
-        "input_type": "series" if (series_dir and os.path.isdir(series_dir)) else "single_file",
+        "input_type": (
+            "film_photo"
+            if film_photo
+            else ("series" if (series_dir and os.path.isdir(series_dir)) else "single_file")
+        ),
         **clinical_struct,
     }
 
+    # Extract representative slices for LLM vision in film-photo mode
+    llm_images_b64: list[str] | None = None
+    if film_photo and meta:
+        try:
+            from film_photo_reporting import extract_film_photo_images_for_llm
+            llm_images_b64 = extract_film_photo_images_for_llm(
+                meta,
+                max_images=10,
+                min_quality_threshold=30.0,
+            )
+            if llm_images_b64:
+                logger.info(
+                    "Spine film-photo mode: extracted %d slices for LLM visual interpretation",
+                    len(llm_images_b64),
+                )
+        except Exception as e:
+            logger.warning("Failed to extract film-photo slices for spine LLM: %s", e)
+            llm_images_b64 = None
+    
     narrative, narr_tags = _spine_narrative_openrouter(
         {k: structures_payload[k] for k in clinical_struct},
         merged_scores,
         pctx,
+        film_photo=film_photo,
+        image_b64_list=llm_images_b64,
     )
     structures_payload["narrative_report"] = narrative
     structures_payload["narrative_policy"] = _spine_narrative_policy()
@@ -528,15 +652,25 @@ def run_pipeline(
     if narrative and len(narrative) > 40:
         impression = narrative[:320].strip() + ("…" if len(narrative) > 320 else "")
 
+    conf_out = "medium"
+    disc_out = DISCLAIMER
+    if film_photo:
+        apply_film_photo_pathology_scores(merged_scores)
+        attach_film_meta_to_structures(structures_payload, meta)
+        conf_out = cap_confidence_for_film(conf_out)
+        disc_out = merge_disclaimer_with_film(
+            DISCLAIMER, True, FILM_PHOTO_DISCLAIMER_ADDENDUM
+        )
+
     return {
         "modality": "spine_neuro",
         "findings": findings,
         "impression": impression,
         "pathology_scores": merged_scores,
         "structures": structures_payload,
-        "confidence": "medium",
+        "confidence": conf_out,
         "models_used": models_used,
-        "disclaimer": DISCLAIMER,
+        "disclaimer": disc_out,
         "is_critical": is_critical,
     }
 
@@ -548,8 +682,22 @@ def _build_spine_findings(
     volumes_cm3: dict,
     is_mri: bool,
     tot_task: str,
+    film_photo: bool = False,
 ) -> list[Finding]:
     findings: list[Finding] = []
+    if film_photo:
+        findings.append(
+            Finding(
+                label="Film photo input (mobile photos of printed CT/MRI film)",
+                description=(
+                    "Spine analysis from photographs of printed films — not DICOM. "
+                    "Vertebral heights, BMD proxy, fracture grading, and segmentation are unreliable; obtain digital imaging for definitive reporting."
+                ),
+                severity="warning",
+                confidence=100.0,
+                region="Spine",
+            )
+        )
     if degraded:
         findings.append(
             Finding(

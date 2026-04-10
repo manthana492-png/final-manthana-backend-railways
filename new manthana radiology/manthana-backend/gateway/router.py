@@ -6,28 +6,74 @@ Maps modality names to internal Docker service URLs.
 import os
 from fastapi import HTTPException
 
-_SERVICE_XRAY = os.getenv("XRAY_SERVICE_URL", "http://body_xray:8001/analyze/xray")
-# In containerized deployments USG_HOST should be the Docker/K8s service name.
-# For local/dev (this sandbox), default to localhost so gateway reaches the
-# FastAPI process on :8009 correctly, while still allowing override via env.
-USG_HOST = os.environ.get("USG_SERVICE_HOST", "localhost")
-USG_PORT = os.environ.get("USG_SERVICE_PORT", "8009")
+
+def _service_url(env_key: str, default: str) -> str:
+    raw = (os.getenv(env_key) or "").strip()
+    return raw if raw else default
+
 
 SERVICE_MAP = {
-    "xray": _SERVICE_XRAY,
-    "brain_mri": "http://brain_mri:8002/analyze/brain_mri",
-    "cardiac_ct": "http://cardiac_ct:8004/analyze/cardiac_ct",
-    "pathology": "http://pathology:8005/analyze/pathology",
-    "abdominal_ct": "http://abdominal_ct:8008/analyze/abdominal_ct",
-    "ultrasound": f"http://{USG_HOST}:{USG_PORT}/analyze/ultrasound",
-    "spine_neuro": "http://spine_neuro:8010/analyze/spine_neuro",
-    "ct_brain": "http://ct_brain:8017/analyze/ct_brain",
-    "cytology": "http://cytology:8011/analyze/cytology",
-    "mammography": "http://mammography:8012/analyze/mammography",
-    "ecg": "http://ecg:8013/analyze/ecg",
-    "oral_cancer": "http://oral_cancer:8014/analyze/oral_cancer",
-    "lab_report": "http://lab_report:8015/analyze/lab_report",
-    "dermatology": "http://dermatology:8016/analyze/dermatology",
+    "xray": _service_url(
+        "XRAY_SERVICE_URL",
+        "http://body_xray:8001/analyze/xray",
+    ),
+    "brain_mri": _service_url(
+        "BRAIN_MRI_SERVICE_URL",
+        "http://brain_mri:8002/analyze/brain_mri",
+    ),
+    "cardiac_ct": _service_url(
+        "CARDIAC_CT_SERVICE_URL",
+        "http://cardiac_ct:8004/analyze/cardiac_ct",
+    ),
+    "pathology": _service_url(
+        "PATHOLOGY_SERVICE_URL",
+        "http://pathology:8005/analyze/pathology",
+    ),
+    "abdominal_ct": _service_url(
+        "ABDOMINAL_CT_SERVICE_URL",
+        "http://abdominal_ct:8008/analyze/abdominal_ct",
+    ),
+    "ultrasound": _service_url(
+        "ULTRASOUND_SERVICE_URL",
+        "http://ultrasound:8009/analyze/ultrasound",
+    ),
+    "spine_neuro": _service_url(
+        "SPINE_NEURO_SERVICE_URL",
+        "http://spine_neuro:8010/analyze/spine_neuro",
+    ),
+    "ct_brain": _service_url(
+        "CT_BRAIN_SERVICE_URL",
+        "http://ct_brain:8017/analyze/ct_brain",
+    ),
+    "ct_brain_vista": _service_url(
+        "CT_BRAIN_VISTA_SERVICE_URL",
+        "http://ct_brain:8017/analyze/ct_brain",
+    ),
+    "cytology": _service_url(
+        "CYTOLOGY_SERVICE_URL",
+        "http://cytology:8011/analyze/cytology",
+    ),
+    "mammography": _service_url(
+        "MAMMOGRAPHY_SERVICE_URL",
+        "http://mammography:8012/analyze/mammography",
+    ),
+    "ecg": _service_url(
+        "ECG_SERVICE_URL",
+        "http://ecg:8013/analyze/ecg",
+    ),
+    # Production: point ORAL_CANCER_SERVICE_URL at Modal GPU manthana-oral-cancer …/analyze/oral_cancer
+    "oral_cancer": _service_url(
+        "ORAL_CANCER_SERVICE_URL",
+        "http://oral_cancer:8014/analyze/oral_cancer",
+    ),
+    "lab_report": _service_url(
+        "LAB_REPORT_SERVICE_URL",
+        "http://lab_report:8015/analyze/lab_report",
+    ),
+    "dermatology": _service_url(
+        "DERMATOLOGY_SERVICE_URL",
+        "http://dermatology:8016/analyze/dermatology",
+    ),
     "pacs": "http://pacs_bridge:8030/pacs",
 }
 
@@ -78,6 +124,8 @@ ALIASES = {
     "skin": "dermatology",
     "derm": "dermatology",
     "skin_lesion": "dermatology",
+    "vista_ct": "ct_brain_vista",
+    "ct_brain_premium": "ct_brain_vista",
 }
 
 

@@ -5,7 +5,7 @@ Unified request/response models used by all services.
 
 from typing import Optional, Any, List, Union
 from pydantic import BaseModel, Field, ConfigDict, field_validator
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -102,7 +102,7 @@ class AnalysisResponse(BaseModel):
     # Metadata
     processing_time_sec: float = 0.0
     models_used: list = Field(default_factory=list)
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     is_critical: Optional[bool] = None
 
     # Lab report (optional — other modalities omit)

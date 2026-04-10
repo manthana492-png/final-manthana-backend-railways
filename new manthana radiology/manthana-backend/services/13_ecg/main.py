@@ -6,7 +6,8 @@ Pipeline:
   1. Input detection (photo vs signal data)
   2. If photo → digitizer or simplified CV extraction
   3. Heuristic rhythm ensemble (Manthana-ECG-Engine) + neurokit2 intervals
-  4. Structured findings (List[Finding]) + interval dict in structures
+  4. OpenRouter narrative_ecg (prompt-engineered report; no local NN weights)
+  5. Structured findings (List[Finding]) + interval dict in structures
 """
 
 import json
@@ -36,13 +37,14 @@ def _parse_patient_context_json(raw: str) -> dict:
 
 @app.get("/health")
 async def health():
-    from inference import is_loaded
-    import torch
+    from inference import get_ecg_pipeline_status, is_loaded
+
     return {
         "service": SERVICE_NAME,
         "status": "ok",
         "models_loaded": is_loaded(),
-        "gpu_available": torch.cuda.is_available(),
+        "component_health": get_ecg_pipeline_status(),
+        "gpu_available": False,
         "version": "1.0.0",
     }
 

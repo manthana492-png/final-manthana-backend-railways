@@ -1,0 +1,38 @@
+# Production image: OpenSlide + llm_router (manthana-inference + cloud_inference.yaml).
+#
+# Build context MUST be `this_studio`:
+#   cd this_studio
+#   docker build -f "new manthana radiology/manthana-backend/services/11_cytology/Dockerfile.railway" -t manthana-cytology .
+
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    libgl1 libglib2.0-0 \
+    libopenslide-dev libopenslide0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+COPY ["packages/manthana-inference", "/app/packages/manthana-inference"]
+COPY ["config/cloud_inference.yaml", "/app/config/cloud_inference.yaml"]
+
+RUN pip install --no-cache-dir -U pip setuptools wheel \
+    && pip install --no-cache-dir -e /app/packages/manthana-inference \
+    && pip install --no-cache-dir "instructor>=1.0.0"
+
+COPY ["new manthana radiology/manthana-backend/services/11_cytology/requirements.txt", "/tmp/cyto-req.txt"]
+RUN pip install --no-cache-dir -r /tmp/cyto-req.txt
+
+COPY ["new manthana radiology/manthana-backend/shared", "/app/shared"]
+COPY ["new manthana radiology/manthana-backend/services/11_cytology", "/app"]
+
+ENV MANTHANA_LLM_REPO_ROOT=/app
+ENV PYTHONPATH=/app:/app/shared
+ENV CLOUD_INFERENCE_CONFIG_PATH=/app/config/cloud_inference.yaml
+ENV MODEL_DIR=/models
+
+EXPOSE 8011
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8011"]

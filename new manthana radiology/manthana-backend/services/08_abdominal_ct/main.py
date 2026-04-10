@@ -7,8 +7,8 @@ import sys
 import tempfile
 import time
 import uuid
-import zipfile
 
+from dicom_utils_helpers import count_dicoms_in_tree as _count_dicoms_in_tree
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 logger = logging.getLogger("manthana.abdominal_ct.main")
@@ -21,54 +21,9 @@ for _p in (
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 from config import PORT, SERVICE_NAME
+from service_upload_prep import prepare_upload_for_pipeline as _prepare_upload_for_pipeline
 
 app = FastAPI(title=f"Manthana — {SERVICE_NAME}")
-
-
-def _prepare_upload_for_pipeline(saved_path: str, filename: str | None, job_id: str) -> tuple[str, list[str]]:
-    """
-    Return (path_for_run_pipeline, cleanup_dir_paths).
-
-    - ZIP → extract to temp dir (DICOM series).
-    - Single .dcm → temp dir with one instance (TotalSegmentator expects a folder).
-    - Raster / NIfTI → use saved file path as-is.
-    """
-    cleanup: list[str] = []
-    ext = (os.path.splitext(filename or "")[1] or "").lower()
-    lower_name = (filename or "").lower()
-
-    if ext == ".zip" or lower_name.endswith(".zip"):
-        d = tempfile.mkdtemp(prefix=f"ct_zip_{job_id}_")
-        cleanup.append(d)
-        try:
-            with zipfile.ZipFile(saved_path, "r") as zf:
-                zf.extractall(d)
-        except zipfile.BadZipFile as e:
-            shutil.rmtree(d, ignore_errors=True)
-            cleanup.clear()
-            raise HTTPException(status_code=400, detail=f"Invalid ZIP: {e}") from e
-        return d, cleanup
-
-    if ext in (".dcm", ".dic") or lower_name.endswith((".dcm", ".dic")):
-        d = tempfile.mkdtemp(prefix=f"ct_series_{job_id}_")
-        cleanup.append(d)
-        dest_name = os.path.basename(filename) if filename else f"instance{ext or '.dcm'}"
-        if not dest_name.lower().endswith((".dcm", ".dic")):
-            dest_name = "instance.dcm"
-        shutil.copy2(saved_path, os.path.join(d, dest_name))
-        return d, cleanup
-
-    return saved_path, cleanup
-
-
-def _count_dicoms_in_tree(root: str) -> int:
-    n = 0
-    for _, _, files in os.walk(root):
-        for f in files:
-            fl = f.lower()
-            if fl.endswith(".dcm") or fl.endswith(".dic"):
-                n += 1
-    return n
 
 
 @app.get("/health")
@@ -123,7 +78,9 @@ async def analyze(
         if series_dir and os.path.isdir(series_dir):
             pipeline_path = fp
         else:
-            pipeline_path, cleanup_dirs = _prepare_upload_for_pipeline(fp, file.filename, job_id)
+            pipeline_path, cleanup_dirs = _prepare_upload_for_pipeline(
+                fp, file.filename, job_id
+            )
 
         n_dcm = _count_dicoms_in_tree(pipeline_path) if os.path.isdir(pipeline_path) else 0
         declared = 0

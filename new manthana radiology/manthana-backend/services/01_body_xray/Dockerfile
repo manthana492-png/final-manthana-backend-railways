@@ -15,6 +15,7 @@ RUN python -c "\
 import torchxrayvision as xrv; \
 xrv.models.DenseNet(weights='densenet121-res224-all'); \
 xrv.models.DenseNet(weights='densenet121-res224-chex'); \
+xrv.models.DenseNet(weights='densenet121-res224-mimic_nb'); \
 print('TXRV weights pre-downloaded OK')"
 
 COPY . .

@@ -2,10 +2,9 @@
 Manthana — Oral cancer inference (India-focused, production-safe).
 
 Paths (graceful degradation, no training in-repo):
-  A) Clinical photo: EfficientNet-B3 + fine-tuned checkpoint (legacy) if present.
-  B) Clinical photo: optional torchvision EfficientNet-V2-M weights file if present.
-  C) Histopathology / H&E-style: UNI encoder (HF) + optional linear head; heuristic if no head.
-  D) Vision LLM (OpenRouter; SSOT config/cloud_inference.yaml) structured JSON fallback when local paths fail or are unavailable.
+  A) Clinical photo: EfficientNet-V2-M and/or EfficientNet-B3 (order: ORAL_PREFER_V2M; default V2-M before B3).
+  B) Histopathology / H&E-style: UNI encoder (HF) + optional linear head; heuristic if no head.
+  C) Vision LLM (OpenRouter; SSOT config/cloud_inference.yaml) structured JSON fallback when local paths fail or are unavailable.
 
 Never raises except OralServiceUnavailableError when ORAL_CANCER_ENABLED is false.
 """
@@ -44,6 +43,9 @@ from config import (
     EFFNET_V2M_CHECKPOINT,
     MODEL_DIR,
     ORAL_CANCER_ENABLED,
+    ORAL_PREFER_V2M,
+    ORAL_V2M_BINARY_OPMD_FRACTION,
+    ORAL_V2M_NUM_CLASSES,
     UNI_HEAD_CHECKPOINT,
     UNI_MODEL_ID,
 )
@@ -128,6 +130,74 @@ def _has_v2m_weights() -> bool:
     return os.path.isfile(_v2m_path())
 
 
+def map_binary_oral_probs_to_three_class(
+    probs_two: np.ndarray,
+    opmd_fraction: float = ORAL_V2M_BINARY_OPMD_FRACTION,
+) -> tuple[np.ndarray, int]:
+    """Map 2-class softmax [normal, malignant] to product schema Normal / OPMD / OSCC."""
+    p = np.clip(np.asarray(probs_two, dtype=np.float64).flatten(), 0.0, 1.0)
+    if p.size < 2:
+        p_n, p_m = 1.0, 0.0
+    else:
+        p_n, p_m = float(p[0]), float(p[1])
+    frac = float(np.clip(opmd_fraction, 0.05, 0.95))
+    opmd = p_m * frac
+    oscc = p_m * (1.0 - frac)
+    three = np.array([p_n, opmd, oscc], dtype=np.float64)
+    three = three / (three.sum() + 1e-9)
+    pred = int(np.argmax(three))
+    return three, pred
+
+
+def _oral_clinical_classifier_order() -> list[str]:
+    """Return ['v2m', 'b3'] or ['b3', 'v2m'] subset to try, based on files on disk and ORAL_PREFER_V2M."""
+    raw = (ORAL_PREFER_V2M or "").lower()
+    has_b3 = _has_b3_checkpoint()
+    has_v2 = _has_v2m_weights()
+    if raw in ("1", "true", "yes"):
+        out: list[str] = []
+        if has_v2:
+            out.append("v2m")
+        if has_b3:
+            out.append("b3")
+        return out
+    if raw in ("0", "false", "no"):
+        out = []
+        if has_b3:
+            out.append("b3")
+        if has_v2:
+            out.append("v2m")
+        return out
+    # Default (production): V2-M before B3 when both exist
+    out = []
+    if has_v2:
+        out.append("v2m")
+    if has_b3:
+        out.append("b3")
+    return out
+
+
+def _run_clinical_photo_classifiers(
+    pil_img: PILImage.Image, *, fallback_label: str | None = None
+) -> tuple[np.ndarray, int, str, str] | None:
+    """Try B3/V2-M in configured order. fallback_label suffix for models_used (e.g. '-fallback')."""
+    suffix = fallback_label or ""
+    for name in _oral_clinical_classifier_order():
+        if name == "b3":
+            b3 = _run_b3_classification(pil_img)
+            if b3 is not None:
+                probs, pred = b3
+                tag = f"EfficientNet-B3{suffix}"
+                return probs, pred, tag, _checkpoint_path()
+        elif name == "v2m":
+            v2 = _run_v2m_classification(pil_img)
+            if v2 is not None:
+                probs, pred = v2
+                tag = f"EfficientNet-V2-M{suffix}"
+                return probs, pred, tag, _v2m_path()
+    return None
+
+
 def _has_uni_head() -> bool:
     return os.path.isfile(_uni_head_path())
 
@@ -145,6 +215,8 @@ def get_loaded_status() -> dict[str, Any]:
         "ready": is_service_ready(),
         "b3_checkpoint": _has_b3_checkpoint(),
         "effnet_v2m_weights": _has_v2m_weights(),
+        "oral_v2m_num_classes": ORAL_V2M_NUM_CLASSES,
+        "oral_clinical_classifier_order": _oral_clinical_classifier_order(),
         "uni_head": _has_uni_head(),
         "openrouter_configured": _has_openrouter_cloud(),
         "oral_cancer_enabled": ORAL_CANCER_ENABLED,
@@ -227,13 +299,14 @@ def _run_v2m_classification(pil_img: PILImage.Image) -> tuple[np.ndarray, int] |
     from torchvision import transforms
     from torchvision.models import efficientnet_v2_m
 
+    n_cls = ORAL_V2M_NUM_CLASSES
     try:
         wpath = _v2m_path()
         model = efficientnet_v2_m(weights=None)
         in_features = model.classifier[1].in_features
         model.classifier = torch.nn.Sequential(
             torch.nn.Dropout(p=0.3, inplace=True),
-            torch.nn.Linear(in_features, 3),
+            torch.nn.Linear(in_features, n_cls),
         )
         try:
             state = torch.load(wpath, map_location="cpu", weights_only=True)
@@ -261,6 +334,11 @@ def _run_v2m_classification(pil_img: PILImage.Image) -> tuple[np.ndarray, int] |
             logits = model(x)
             probs = F.softmax(logits, dim=1).squeeze().cpu().numpy()
         probs = np.asarray(probs, dtype=np.float64).flatten()
+        if n_cls == 2:
+            if probs.size < 2:
+                return None
+            probs3, pred = map_binary_oral_probs_to_three_class(probs[:2])
+            return probs3, pred
         if probs.size < 3:
             return None
         pred = int(np.argmax(probs[:3]))
@@ -897,28 +975,23 @@ def run_oral_cancer_pipeline(
             if uni.get("model_path"):
                 models_used.append("UNI-linear-head")
 
-    # Path A: clinical photo — B3 then V2M
+    # Path A: clinical photo — V2-M / B3 order from _oral_clinical_classifier_order()
     if score_bundle is None and input_type in ("clinical_photo", "mixed", "unknown"):
-        b3 = _run_b3_classification(pil_img)
-        if b3 is not None:
-            probs, pred = b3
+        clin = _run_clinical_photo_classifiers(pil_img)
+        if clin is not None:
+            probs, pred, tag, mpath = clin
             score_bundle = _scores_from_b3(probs, pred)
-            models_used.append("EfficientNet-B3")
-            model_path_note = _checkpoint_path()
-        else:
-            v2 = _run_v2m_classification(pil_img)
-            if v2 is not None:
-                probs, pred = v2
-                score_bundle = _scores_from_b3(probs, pred)
-                models_used.append("EfficientNet-V2-M")
-                model_path_note = _v2m_path()
+            models_used.append(tag)
+            model_path_note = mpath
 
     # If histopathology but UNI failed, try clinical models as weak second
     if score_bundle is None and input_type == "histopathology":
-        b3 = _run_b3_classification(pil_img)
-        if b3 is not None:
-            score_bundle = _scores_from_b3(*b3)
-            models_used.append("EfficientNet-B3-fallback")
+        clin = _run_clinical_photo_classifiers(pil_img, fallback_label="-fallback")
+        if clin is not None:
+            probs, pred, tag, mpath = clin
+            score_bundle = _scores_from_b3(probs, pred)
+            models_used.append(tag)
+            model_path_note = mpath
             limitation_notes.append("Clinical classifier applied to non-clinical image — interpret with caution.")
 
     vision_data: dict[str, Any] | None = None
@@ -998,7 +1071,9 @@ def run_oral_cancer_pipeline(
         "clinical_notes": clinical_notes or "",
         "patient_context": ctx,
         "predicted_class": str(score_bundle.get("_label", "")),
-        "checkpoint_used": _has_b3_checkpoint(),
+        "checkpoint_used": any(
+            isinstance(m, str) and m.startswith("EfficientNet") for m in models_used
+        ),
         "limitations": limitation_notes,
     }
 

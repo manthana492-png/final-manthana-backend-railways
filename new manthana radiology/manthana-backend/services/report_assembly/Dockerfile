@@ -1,3 +1,7 @@
+# Local / docker-compose build: context = this directory (services/report_assembly).
+# For Railway with llm_router + cloud_inference.yaml, use Dockerfile.railway from `this_studio` root
+# (see header comment in Dockerfile.railway).
+
 FROM python:3.11-slim
 
 WORKDIR /app

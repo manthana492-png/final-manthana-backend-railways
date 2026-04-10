@@ -49,9 +49,12 @@ async function readGatewayError(res: Response): Promise<string> {
 export function createApiClient(config: ApiClientConfig) {
   const { baseUrl, getAuthToken } = config;
 
-  function authHeaders() {
+  function authHeaders(): Record<string, string> {
     const token = getAuthToken?.();
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    if (token) {
+      return { Authorization: `Bearer ${token}` };
+    }
+    return {};
   }
 
   return {

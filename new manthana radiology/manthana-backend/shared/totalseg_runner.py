@@ -75,32 +75,53 @@ def run_totalseg(
         }
     """
     from totalsegmentator.python_api import totalsegmentator
+    import shutil
 
-    nii_path, _ = _ensure_nifti_path(input_path, affine=affine)
+    nii_path, nii_temp_created = _ensure_nifti_path(input_path, affine=affine)
     out = output_dir or tempfile.mkdtemp(prefix=f"totalseg_{task}_", dir=_totalseg_work_root())
+    out_temp_created = output_dir is None  # Track if we created a temp output dir
     os.makedirs(out, exist_ok=True)
 
     ensure_totalseg_idle_reaper_started()
-    totalsegmentator(nii_path, out, task=task, fast=fast, device=device)
-    touch_totalseg_gpu_activity()
+    try:
+        totalsegmentator(nii_path, out, task=task, fast=fast, device=device)
+        touch_totalseg_gpu_activity()
 
-    mask_paths: dict[str, str] = {}
-    for f in sorted(Path(out).rglob("*.nii.gz")):
-        name = f.name.replace(".nii.gz", "").replace(".nii", "")
-        mask_paths[name] = str(f)
+        mask_paths: dict[str, str] = {}
+        for f in sorted(Path(out).rglob("*.nii.gz")):
+            name = f.name.replace(".nii.gz", "").replace(".nii", "")
+            mask_paths[name] = str(f)
 
-    structure_names = sorted(mask_paths.keys())
-    if not structure_names:
-        logger.warning("TotalSegmentator produced no .nii.gz outputs in %s", out)
+        structure_names = sorted(mask_paths.keys())
+        if not structure_names:
+            logger.warning("TotalSegmentator produced no .nii.gz outputs in %s", out)
 
-    volumes_cm3 = compute_organ_volumes(out, task=task)
+        volumes_cm3 = compute_organ_volumes(out, task=task)
 
-    return {
-        "structure_names": structure_names,
-        "mask_paths": mask_paths,
-        "output_dir": out,
-        "volumes_cm3": volumes_cm3,
-    }
+        # Cleanup temp input NIfTI if we created it
+        if nii_temp_created:
+            try:
+                nii_temp_dir = os.path.dirname(nii_path)
+                shutil.rmtree(nii_temp_dir, ignore_errors=True)
+            except Exception as e:
+                logger.debug("Failed to cleanup temp NIfTI: %s", e)
+
+        return {
+            "structure_names": structure_names,
+            "mask_paths": mask_paths,
+            "output_dir": out,
+            "volumes_cm3": volumes_cm3,
+            "temp_output_dir": out if out_temp_created else None,  # Flag caller to cleanup
+        }
+    except Exception as e:
+        # Cleanup on failure too
+        if nii_temp_created:
+            try:
+                nii_temp_dir = os.path.dirname(nii_path)
+                shutil.rmtree(nii_temp_dir, ignore_errors=True)
+            except:
+                pass
+        raise
 
 
 def get_totalseg_version() -> str:

@@ -4,8 +4,8 @@ User uploads ANY X-ray → auto-detects body region → routes to the appropriat
 
 Pipelines:
   Chest → TorchXRayVision dual-model ensemble (all + chex or mimic_nb fallback)
-  Bone / extremity / spine / skull → unavailable (status=unavailable, confidence=low)
-  Abdomen / pelvis → unavailable (status=unavailable, confidence=low)
+  Bone / extremity / spine / skull → deterministic OpenCV/numeric scoring (pipeline_bone)
+  Abdomen / pelvis → deterministic OpenCV/numeric scoring (pipeline_abdomen)
 """
 
 import json

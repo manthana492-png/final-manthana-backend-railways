@@ -23,9 +23,22 @@ from ct_brain_gpu_idle import (
     idle_policy_snapshot,
     touch_ct_brain_gpu_activity,
 )
-from disclaimer import DISCLAIMER
+from disclaimer import DISCLAIMER, FILM_PHOTO_DISCLAIMER_ADDENDUM
+from film_photo_reporting import (
+    FILM_PHOTO_NARRATIVE_PREFIX,
+    apply_film_photo_pathology_scores,
+    attach_film_meta_to_structures,
+    cap_confidence_for_film,
+    is_film_photo_meta,
+    merge_disclaimer_with_film,
+)
+from hemorrhage_classifier import run_subtype_classifier
+from heuristics import run_ct_brain_heuristics
 from preprocessing.ct_loader import is_degraded_single_slice, load_ct_volume
 from schemas import Finding
+from volume_segmentation import run_volume_analysis
+
+import config as ct_brain_config
 
 logger = logging.getLogger("manthana.ct_brain")
 PIPELINE_VERSION = "manthana-ct-brain-v1"
@@ -44,6 +57,32 @@ def _narrative_policy() -> str:
 
 def _critical_threshold() -> float:
     return float(os.environ.get("CT_BRAIN_CRITICAL_THRESHOLD", "0.5") or "0.5")
+
+
+def _derive_confidence(
+    inference_mode: str,
+    ich_prob: float | None,
+    subtype_ok: bool,
+    seg_source: str | None,
+) -> str:
+    if inference_mode == "ci_dummy":
+        return "low"
+    if inference_mode == "weights_required":
+        return "low"
+    if ich_prob is None:
+        return "medium"
+    parts = 1
+    if subtype_ok:
+        parts += 1
+    if seg_source and seg_source not in ("none",):
+        parts += 1
+    if ich_prob >= _critical_threshold():
+        return "high" if parts >= 2 else "medium-high"
+    if parts >= 3:
+        return "high"
+    if parts == 2:
+        return "medium-high"
+    return "medium"
 
 
 def _torch_device():
@@ -148,6 +187,8 @@ def _call_ct_brain_narrative(
     findings: list,
     pathology_scores: dict,
     patient_context: dict | None,
+    film_photo: bool = False,
+    image_b64_list: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     if _narrative_policy() == "off":
         return "", []
@@ -157,6 +198,8 @@ def _call_ct_brain_narrative(
         "using ONLY the structured JSON. Flag emergency patterns if scores/findings support them; "
         "do not invent hemorrhage if ich_probability is absent or inference_mode is weights_required."
     )
+    if film_photo:
+        system = FILM_PHOTO_NARRATIVE_PREFIX + system
     user_text = (
         f"IMPRESSION (pipeline):\n{impression}\n\n"
         f"FINDINGS:\n{json.dumps(findings, indent=2)[:8000]}\n\n"
@@ -168,12 +211,26 @@ def _call_ct_brain_narrative(
     try:
         from llm_router import llm_router
 
-        out = llm_router.complete_for_role(
-            "narrative_ct",
-            system,
-            user_text,
-            max_tokens=1200,
-        )
+        # For film-photo mode with multi-image vision
+        has_vision_images = film_photo and image_b64_list and len(image_b64_list) > 0
+        
+        if has_vision_images:
+            logger.info("CT brain narrative: using multi-image vision with %d film-photo slices", len(image_b64_list))
+            out = llm_router.complete_for_role(
+                "narrative_ct",
+                system,
+                user_text,
+                image_b64_list=image_b64_list,
+                image_mime="image/png",
+                max_tokens=2000,
+            )
+        else:
+            out = llm_router.complete_for_role(
+                "narrative_ct",
+                system,
+                user_text,
+                max_tokens=1200,
+            )
         txt = (out.get("content") or "").strip()
         if txt:
             return txt, ["OpenRouter-narrative-CT-Brain"]
@@ -184,10 +241,14 @@ def _call_ct_brain_narrative(
 
 def is_loaded() -> dict:
     path = (os.environ.get("CT_BRAIN_TORCHSCRIPT_PATH") or "").strip()
+    sub = (os.environ.get("CT_BRAIN_SUBTYPE_MODEL_PATH") or "").strip()
+    seg = (os.environ.get("CT_BRAIN_SEGMENTATION_MODEL_PATH") or "").strip()
     ci = os.getenv("CT_BRAIN_CI_DUMMY_MODEL", "").lower() in ("1", "true", "yes")
     return {
         "torchscript_configured": bool(path),
         "torchscript_file_present": bool(path and os.path.isfile(path)),
+        "subtype_model_configured": bool(sub and os.path.isfile(sub)),
+        "segmentation_model_configured": bool(seg and os.path.isfile(seg)),
         "ci_dummy_enabled": ci,
         "pipeline_version": PIPELINE_VERSION,
         **idle_policy_snapshot(),
@@ -207,6 +268,7 @@ def run_pipeline(
     degraded = is_degraded_single_slice(volume)
     meta = meta if isinstance(meta, dict) else {}
     meta_mod = str(meta.get("modality") or "").upper()
+    film_photo = is_film_photo_meta(meta)
 
     models_used: list[str] = []
     pathology_scores: dict[str, Any] = {"series_available": bool(series_avail)}
@@ -243,7 +305,55 @@ def run_pipeline(
     if ich_prob is not None:
         pathology_scores["ich_probability"] = round(float(ich_prob), 4)
 
+    subtype_scores = None
+    if tensor_in is not None:
+        subtype_scores = run_subtype_classifier(tensor_in)
+    if subtype_scores:
+        pathology_scores["hemorrhage_subtypes"] = subtype_scores
+        models_used.append("CT-Brain-Subtype-Classifier")
+
+    vol_info = run_volume_analysis(volume, meta, tensor_in)
+    pathology_scores["hemorrhage_volume_ml"] = vol_info.get("hemorrhage_volume_ml")
+    pathology_scores["ventricle_volume_ml"] = vol_info.get("ventricle_volume_ml")
+    pathology_scores["segmentation_source"] = vol_info.get("segmentation_source")
+    if vol_info.get("segmentation_source") == "torchscript":
+        models_used.append("CT-Brain-Volume-Segmentation")
+
+    heur = run_ct_brain_heuristics(
+        volume,
+        meta,
+        vol_info.get("ventricle_volume_ml"),
+        enabled_ncc=ct_brain_config.CT_BRAIN_NCC_ENABLED,
+        enabled_midline=ct_brain_config.CT_BRAIN_MIDLINE_ENABLED,
+    )
+    pathology_scores.update({k: v for k, v in heur.items() if k not in pathology_scores})
+
     findings: list[Finding] = []
+    from vista3d_integration import enrich_vista3d_metadata
+
+    enrich_vista3d_metadata(
+        volume=volume,
+        meta=meta,
+        film_photo=film_photo,
+        degraded=degraded,
+        pathology_scores=pathology_scores,
+        findings=findings,
+    )
+
+    if film_photo:
+        findings.append(
+            Finding(
+                label="Film photo input (mobile photos of printed CT/MRI film)",
+                description=(
+                    "Analysis is based on phone photographs of printed films, not DICOM. "
+                    "ICH scores, subtypes, volumes, and heuristics are approximate only — obtain original CT data when possible."
+                ),
+                severity="warning",
+                confidence=100.0,
+                region="Brain",
+            )
+        )
+
     if degraded:
         findings.append(
             Finding(
@@ -309,6 +419,52 @@ def run_pipeline(
             )
         )
 
+    if subtype_scores:
+        top = max(subtype_scores.items(), key=lambda kv: kv[1])
+        if top[1] >= 0.35:
+            findings.append(
+                Finding(
+                    label="ICH subtype distribution (auxiliary model)",
+                    description=f"Highest subtype score: {top[0]}={top[1]:.2f}. Correlation required.",
+                    severity="warning" if top[1] < 0.6 else "critical",
+                    confidence=min(95.0, 40.0 + top[1] * 55.0),
+                    region="Brain",
+                )
+            )
+
+    if heur.get("midline_shift_mm") is not None and float(heur["midline_shift_mm"]) > 3.0:
+        findings.append(
+            Finding(
+                label="Midline shift (heuristic)",
+                description=f"Estimated midline shift ~{heur['midline_shift_mm']} (units depend on spacing metadata).",
+                severity="critical",
+                confidence=70.0,
+                region="Brain",
+            )
+        )
+
+    if heur.get("hydrocephalus_flag"):
+        findings.append(
+            Finding(
+                label="Hydrocephalus pattern (volume heuristic)",
+                description="Enlarged ventricular volume by segmentation/heuristic threshold.",
+                severity="warning",
+                confidence=65.0,
+                region="Brain",
+            )
+        )
+
+    if heur.get("ncc_suspect"):
+        findings.append(
+            Finding(
+                label="Calcification pattern — NCC differential (heuristic)",
+                description="Multiple small intracranial calcifications detected; correlate for neurocysticercosis vs TB/toxoplasma.",
+                severity="warning",
+                confidence=55.0,
+                region="Brain",
+            )
+        )
+
     impression = "NCCT brain analysis complete. Clinical correlation required."
     if inference_mode == "weights_required":
         impression = "NCCT brain received — AI hemorrhage model not configured; no automated ICH score."
@@ -316,11 +472,33 @@ def run_pipeline(
         impression = "NCCT brain CI dummy inference — not for clinical use."
 
     findings_out = [f.model_dump() if isinstance(f, Finding) else f for f in findings]
+    
+    # Extract representative slices for LLM vision in film-photo mode
+    llm_images_b64: list[str] | None = None
+    if film_photo and meta:
+        try:
+            from film_photo_reporting import extract_film_photo_images_for_llm
+            llm_images_b64 = extract_film_photo_images_for_llm(
+                meta,
+                max_images=10,
+                min_quality_threshold=30.0,
+            )
+            if llm_images_b64:
+                logger.info(
+                    "CT brain film-photo mode: extracted %d slices for LLM visual interpretation",
+                    len(llm_images_b64),
+                )
+        except Exception as e:
+            logger.warning("Failed to extract film-photo slices for CT brain LLM: %s", e)
+            llm_images_b64 = None
+    
     narrative, narr_tags = _call_ct_brain_narrative(
         impression=impression,
         findings=findings_out,
         pathology_scores=pathology_scores,
         patient_context=patient_context,
+        film_photo=film_photo,
+        image_b64_list=llm_images_b64,
     )
     models_used.extend(narr_tags)
 
@@ -343,13 +521,28 @@ def run_pipeline(
 
     touch_ct_brain_gpu_activity()
 
+    conf = _derive_confidence(
+        inference_mode,
+        ich_prob,
+        bool(subtype_scores),
+        vol_info.get("segmentation_source"),
+    )
+    disc = DISCLAIMER
+    if film_photo:
+        apply_film_photo_pathology_scores(pathology_scores)
+        attach_film_meta_to_structures(structures, meta)
+        conf = cap_confidence_for_film(str(conf))
+        disc = merge_disclaimer_with_film(
+            DISCLAIMER, True, FILM_PHOTO_DISCLAIMER_ADDENDUM
+        )
+
     return {
         "modality": "ct_brain",
         "findings": findings_out,
         "impression": impression,
         "pathology_scores": pathology_scores,
         "structures": structures,
-        "confidence": "medium",
+        "confidence": conf,
         "models_used": models_used,
-        "disclaimer": DISCLAIMER,
+        "disclaimer": disc,
     }

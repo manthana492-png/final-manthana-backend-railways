@@ -15,3 +15,9 @@ DISCLAIMER_SHORT = (
     "AI second-opinion only. Not a medical device. "
     "Confirm with qualified physician."
 )
+
+FILM_PHOTO_DISCLAIMER_ADDENDUM = (
+    "This analysis used mobile phone photographs of printed medical films as input, "
+    "which have inherently lower diagnostic quality than original DICOM images; "
+    "quantitative scores and segmentation are approximate and not equivalent to PACS-based review."
+)

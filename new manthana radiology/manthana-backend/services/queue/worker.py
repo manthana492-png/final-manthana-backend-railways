@@ -10,6 +10,8 @@ import logging
 # Add shared to path
 sys.path.insert(0, "/app/shared")
 
+from queue_client import redis_queue_enabled
+
 from redis import Redis
 from rq import Worker, Queue
 
@@ -24,6 +26,12 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 def main():
     """Start the RQ worker process."""
+    if not redis_queue_enabled():
+        logger.error(
+            "USE_REDIS_QUEUE is not enabled; worker exiting. "
+            "Set USE_REDIS_QUEUE=1 and REDIS_URL, or use docker compose --profile queue."
+        )
+        raise SystemExit(1)
     redis_conn = Redis.from_url(REDIS_URL)
     
     queues = [Queue("manthana", connection=redis_conn)]

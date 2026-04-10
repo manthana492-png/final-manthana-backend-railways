@@ -15,6 +15,17 @@ _SHARED = os.path.join(_BACKEND, "shared")
 _ORAL = os.path.join(_BACKEND, "services", "14_oral_cancer")
 
 
+def _purge_oral_service_modules() -> None:
+    oral_abs = os.path.abspath(_ORAL)
+    for key in ("config", "inference", "main"):
+        mod = sys.modules.get(key)
+        if not mod:
+            continue
+        fp = getattr(mod, "__file__", None)
+        if fp and os.path.abspath(os.path.dirname(fp)) == oral_abs:
+            del sys.modules[key]
+
+
 @pytest.fixture
 def correlation_engine():
     sys.path.insert(0, _REPORT_ASSEMBLY)
@@ -183,3 +194,114 @@ def test_analysis_response_validates():
     validated = AnalysisResponse(**mock_result)
     assert isinstance(validated.findings, list)
     assert validated.findings[0].confidence == 87.3
+
+
+def test_map_binary_oral_probs_to_three_class():
+    import importlib
+
+    numpy = pytest.importorskip("numpy")
+    sys.path.insert(0, _ORAL)
+    import inference as oral_inference
+
+    importlib.reload(oral_inference)
+    three, pred = oral_inference.map_binary_oral_probs_to_three_class(
+        numpy.array([0.7, 0.3], dtype=numpy.float64)
+    )
+    assert abs(float(three.sum()) - 1.0) < 1e-5
+    assert pred == 0
+    three2, pred2 = oral_inference.map_binary_oral_probs_to_three_class(
+        numpy.array([0.05, 0.95], dtype=numpy.float64), opmd_fraction=0.3
+    )
+    assert pred2 == 2
+    assert three2[2] > three2[1]
+
+
+def test_oral_classifier_order_v2m_before_b3_by_default(tmp_path, monkeypatch):
+    import importlib
+
+    _purge_oral_service_modules()
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
+    monkeypatch.delenv("ORAL_PREFER_V2M", raising=False)
+    (tmp_path / "oral_cancer_finetuned.pt").write_bytes(b"1")
+    (tmp_path / "oral_effnet_v2m.pt").write_bytes(b"1")
+    sys.path.insert(0, _ORAL)
+    import config as oral_config
+
+    importlib.reload(oral_config)
+    import inference as oral_inference
+
+    importlib.reload(oral_inference)
+    assert oral_inference._oral_clinical_classifier_order() == ["v2m", "b3"]
+
+
+def test_oral_classifier_order_b3_first_when_env_false(tmp_path, monkeypatch):
+    import importlib
+
+    _purge_oral_service_modules()
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv("ORAL_PREFER_V2M", "false")
+    (tmp_path / "oral_cancer_finetuned.pt").write_bytes(b"1")
+    (tmp_path / "oral_effnet_v2m.pt").write_bytes(b"1")
+    sys.path.insert(0, _ORAL)
+    import config as oral_config
+
+    importlib.reload(oral_config)
+    import inference as oral_inference
+
+    importlib.reload(oral_inference)
+    assert oral_inference._oral_clinical_classifier_order() == ["b3", "v2m"]
+
+
+def test_analyze_oral_cancer_smoke_200_with_mock_classifier(tmp_path, monkeypatch):
+    from PIL import Image
+
+    numpy = pytest.importorskip("numpy")
+    img_path = tmp_path / "oral_smoke.jpg"
+    Image.new("RGB", (32, 32), color=(120, 80, 60)).save(img_path, "JPEG")
+
+    _purge_oral_service_modules()
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv("ORAL_CANCER_ENABLED", "true")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_2", raising=False)
+    sys.modules.pop("schemas", None)
+    sys.path.insert(0, _SHARED)
+    sys.path.insert(0, _ORAL)
+
+    import importlib
+
+    import config as oral_config
+
+    importlib.reload(oral_config)
+    import inference as oral_inference
+
+    importlib.reload(oral_inference)
+
+    def fake_clinical(pil, **kw):
+        a = numpy.array([0.82, 0.12, 0.06], dtype=numpy.float64)
+        return a, 0, "EfficientNet-V2-M", str(tmp_path / "oral_effnet_v2m.pt")
+
+    monkeypatch.setattr(oral_inference, "_run_clinical_photo_classifiers", fake_clinical)
+    monkeypatch.setattr(
+        oral_inference,
+        "_call_oral_cancer_narrative",
+        lambda **kw: ("", [], None),
+    )
+
+    import main as oral_main
+
+    importlib.reload(oral_main)
+
+    from fastapi.testclient import TestClient
+
+    client = TestClient(oral_main.app, raise_server_exceptions=False)
+    with open(img_path, "rb") as f:
+        resp = client.post(
+            "/analyze/oral_cancer",
+            files={"file": ("oral_smoke.jpg", f, "image/jpeg")},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("modality") == "oral_cancer"
+    assert "EfficientNet-V2-M" in body.get("models_used", [])
+    assert body.get("structures", {}).get("checkpoint_used") is True

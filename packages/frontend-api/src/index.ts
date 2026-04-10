@@ -15,6 +15,7 @@ export type {
   ScanCase,
   ScanImage,
   ScanStage,
+  ImageScan,
   Modality,
   AnalysisMode,
   MultiModelUpload,

@@ -1,12 +1,11 @@
 # Manthana cloud inference — single source of truth (OpenRouter)
-# Orchestration: edit `model` / `fallback_models` per role; runtime secret is OPENROUTER_API_KEY (never commit).
-# Default models are sensible OpenRouter slugs — replace with your orchestration choices.
+# Labs + narratives: primary `moonshotai/kimi-k2.5:online`; fallbacks keep service up if Kimi rate-limits.
+# Runtime: OPENROUTER_API_KEY (+ optional OPENROUTER_API_KEY_2). Override path: CLOUD_INFERENCE_CONFIG_PATH.
 
 schema_version: "1"
 
 openrouter_base_url: "https://openrouter.ai/api/v1"
 
-# Optional HTTP headers for OpenRouter dashboard attribution (values from env at runtime).
 header_env:
   HTTP-Referer: OPENROUTER_HTTP_REFERER
   X-Title: OPENROUTER_APP_TITLE
@@ -15,171 +14,200 @@ defaults:
   max_tokens: 4096
   temperature: 0.2
 
+# Shared fallback chains (OpenRouter slugs)
+x_fallabs: &fb_labs
+  - "openai/gpt-4o-mini:online"
+  - "meta-llama/llama-3.3-70b-instruct"
+x_falshort: &fb_short
+  - "openai/gpt-4o-mini:online"
+x_falvision: &fb_vision
+  - "openai/gpt-4o-mini:online"
+  - "meta-llama/llama-3.3-70b-instruct"
+  - "anthropic/claude-3.5-sonnet"
+
 roles:
   # --- oracle-2 stack ---
   oracle_chat:
     model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.2
-    fallback_models: ["openai/gpt-4o-mini:online"]
+    fallback_models: *fb_labs
   oracle_chat_free:
     model: "openrouter/free"
     max_tokens: 8192
     temperature: 0.2
-    fallback_models: [
-      "qwen/qwen3.6-plus-04-02",
-      "stepfun/step-3.5-flash",
-      "nvidia/nemotron-3-nano-30b-a3b",
-      "nvidia/nemotron-3-super-120b-a12b-20230311",
-      "arcee-ai/trinity-large-preview",
-      "moonshotai/kimi-k2.5:online"
-    ]
+    fallback_models:
+      - "qwen/qwen3.6-plus-04-02"
+      - "stepfun/step-3.5-flash"
+      - "nvidia/nemotron-3-nano-30b-a3b"
+      - "nvidia/nemotron-3-super-120b-a12b-20230311"
+      - "arcee-ai/trinity-large-preview"
+      - "moonshotai/kimi-k2.5:online"
   oracle_m5:
     model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.15
-    fallback_models: ["openai/gpt-4o-mini:online"]
+    fallback_models: *fb_labs
   oracle_m5_free:
     model: "openrouter/free"
     max_tokens: 4096
     temperature: 0.15
-    fallback_models: [
-      "qwen/qwen3.6-plus-04-02",
-      "stepfun/step-3.5-flash",
-      "nvidia/nemotron-3-nano-30b-a3b",
-      "nvidia/nemotron-3-super-120b-a12b-20230311",
-      "arcee-ai/trinity-large-preview",
-      "moonshotai/kimi-k2.5:online"
-    ]
+    fallback_models:
+      - "qwen/qwen3.6-plus-04-02"
+      - "stepfun/step-3.5-flash"
+      - "nvidia/nemotron-3-nano-30b-a3b"
+      - "nvidia/nemotron-3-super-120b-a12b-20230311"
+      - "arcee-ai/trinity-large-preview"
+      - "moonshotai/kimi-k2.5:online"
   ai_router_chat:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.2
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   ai_router_synthesis:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.15
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   research_synthesis:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.25
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   research_planner:
-    model: "meta-llama/llama-3.1-8b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 512
     temperature: 0.3
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_short
   web_knowledge:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 256
     temperature: 0.3
-    fallback_models: []
+    fallback_models: *fb_short
   orchestrator_synthesis:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 1024
     temperature: 0.1
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
 
-  # --- manthana radiology / modality narratives (shared llm_router task types) ---
+  # --- Manthana Labs (modalities): same primary as Oracle ---
   clinical_qa:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.1
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   lab_report:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.1
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   unified_report:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.15
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   summarization:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 2048
     temperature: 0.2
-    fallback_models: []
+    fallback_models: *fb_labs
   correlation:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.15
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   narrative_default:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.1
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   narrative_ct:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.1
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   narrative_mri:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.1
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
+  narrative_ct_brain:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: *fb_labs
+  narrative_ct_chest:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: *fb_labs
+  narrative_ct_cardiac:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: *fb_labs
+  narrative_brain_mri:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: *fb_labs
   narrative_usg:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 1200
     temperature: 0.25
-    fallback_models: ["meta-llama/llama-3.3-70b-instruct"]
+    fallback_models: *fb_labs
   narrative_ecg:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 1200
     temperature: 0.2
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   vision_primary:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.1
-    fallback_models: ["anthropic/claude-3.5-sonnet"]
+    fallback_models: *fb_vision
   vision_pathology:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.1
-    fallback_models: []
+    fallback_models: *fb_vision
   cytology:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 2000
     temperature: 0.1
-    fallback_models: ["meta-llama/llama-3.3-70b-instruct"]
+    fallback_models: *fb_labs
   dermatology:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.15
-    fallback_models: []
+    fallback_models: *fb_vision
   copilot:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.2
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   oral_cancer:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.1
-    fallback_models: []
+    fallback_models: *fb_vision
   mammography:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.1
-    fallback_models: []
+    fallback_models: *fb_labs
   spine:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.1
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   report_assembly:
-    model: "meta-llama/llama-3.3-70b-instruct"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 8192
     temperature: 0.15
-    fallback_models: ["openai/gpt-4o-mini"]
+    fallback_models: *fb_labs
   fallback:
-    model: "openai/gpt-4o-mini"
+    model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
     temperature: 0.2
-    fallback_models: []
+    fallback_models: *fb_labs

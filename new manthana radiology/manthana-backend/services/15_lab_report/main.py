@@ -1,6 +1,6 @@
 """
 Manthana — Lab Report Analysis Service
-Interprets PDF/text lab reports using OpenRouter + optional Parrotlet VLM.
+Interprets PDF/text lab reports using OpenRouter + optional MedGemma (medical_document_parser).
 
 Input: multipart file or JSON { document_b64, patient_context_json }
 Output: Structured findings with E2E enrichment (test_results, patterns, narrative).
@@ -63,12 +63,19 @@ async def health():
         if k and len(k) >= 8:
             or_ok = True
             break
+    gpu_ok = False
+    try:
+        import torch
+
+        gpu_ok = bool(torch.cuda.is_available())
+    except Exception:
+        pass
     return {
         "service": SERVICE_NAME,
         "status": "ok" if or_ok else "no_api_key",
         "models_loaded": or_ok,
         "llm": "openrouter",
-        "gpu_available": False,
+        "gpu_available": gpu_ok,
         "version": "1.0.0",
     }
 

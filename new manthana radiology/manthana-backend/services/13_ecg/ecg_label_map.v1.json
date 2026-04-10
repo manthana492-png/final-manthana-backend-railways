@@ -1,0 +1,74 @@
+{
+  "version": "1.0.0",
+  "description": "Map ECGFounder / external classifier label substrings to legacy RHYTHM_KEYS. Match is case-insensitive substring on founder keys.",
+  "entries": [
+    {
+      "match": "atrial_fibrillation",
+      "legacy_weights": { "atrial_fibrillation": 1.0 }
+    },
+    {
+      "match": "afib",
+      "legacy_weights": { "atrial_fibrillation": 1.0 }
+    },
+    {
+      "match": "stemi",
+      "legacy_weights": { "st_elevation": 1.0 }
+    },
+    {
+      "match": "st_elevation",
+      "legacy_weights": { "st_elevation": 1.0 }
+    },
+    {
+      "match": "st_depression",
+      "legacy_weights": { "st_depression": 1.0 }
+    },
+    {
+      "match": "left_bundle",
+      "legacy_weights": { "lbbb": 1.0 }
+    },
+    {
+      "match": "lbbb",
+      "legacy_weights": { "lbbb": 1.0 }
+    },
+    {
+      "match": "right_bundle",
+      "legacy_weights": { "rbbb": 1.0 }
+    },
+    {
+      "match": "rbbb",
+      "legacy_weights": { "rbbb": 1.0 }
+    },
+    {
+      "match": "lvh",
+      "legacy_weights": { "lvh": 1.0 }
+    },
+    {
+      "match": "left_ventricular_hypertrophy",
+      "legacy_weights": { "lvh": 1.0 }
+    },
+    {
+      "match": "sinus_tachycardia",
+      "legacy_weights": { "sinus_tachycardia": 1.0 }
+    },
+    {
+      "match": "tachycardia",
+      "legacy_weights": { "sinus_tachycardia": 0.85 }
+    },
+    {
+      "match": "sinus_bradycardia",
+      "legacy_weights": { "sinus_bradycardia": 1.0 }
+    },
+    {
+      "match": "bradycardia",
+      "legacy_weights": { "sinus_bradycardia": 0.85 }
+    },
+    {
+      "match": "normal",
+      "legacy_weights": { "sinus_rhythm": 1.0 }
+    },
+    {
+      "match": "sinus_rhythm",
+      "legacy_weights": { "sinus_rhythm": 1.0 }
+    }
+  ]
+}

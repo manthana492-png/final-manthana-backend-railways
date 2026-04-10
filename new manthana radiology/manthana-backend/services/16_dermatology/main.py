@@ -29,7 +29,16 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": SERVICE_NAME}
+    st = get_ready()
+    ch = st.get("component_health") or {}
+    return {
+        "status": "ok",
+        "service": SERVICE_NAME,
+        "mode": st.get("mode"),
+        "openrouter_configured": st.get("openrouter_configured"),
+        "component_health": ch,
+        "version": "1.0.0",
+    }
 
 
 @app.get("/ready")

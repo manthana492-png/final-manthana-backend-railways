@@ -13,6 +13,3 @@ transformers>=4.52.0
 accelerate>=1.0.0          # device_map="auto" support
 huggingface_hub>=0.24.0    # snapshot_download (HF fallback)
 modelscope>=1.9.0          # primary download source (no gating)
-
-# Vector Store (ChromaDB for case embeddings)
-chromadb>=0.5.0

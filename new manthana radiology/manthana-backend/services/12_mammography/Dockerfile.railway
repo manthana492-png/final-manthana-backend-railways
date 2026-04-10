@@ -1,0 +1,37 @@
+# Production image: Mirai + llm_router (manthana-inference + cloud_inference.yaml).
+#
+# Build context MUST be `this_studio`:
+#   cd this_studio
+#   docker build -f "new manthana radiology/manthana-backend/services/12_mammography/Dockerfile.railway" -t manthana-mammography .
+
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+COPY ["packages/manthana-inference", "/app/packages/manthana-inference"]
+COPY ["config/cloud_inference.yaml", "/app/config/cloud_inference.yaml"]
+
+RUN pip install --no-cache-dir -U pip setuptools wheel \
+    && pip install --no-cache-dir -e /app/packages/manthana-inference \
+    && pip install --no-cache-dir "instructor>=1.0.0"
+
+COPY ["new manthana radiology/manthana-backend/services/12_mammography/requirements.txt", "/tmp/mammo-req.txt"]
+RUN pip install --no-cache-dir -r /tmp/mammo-req.txt
+
+COPY ["new manthana radiology/manthana-backend/shared", "/app/shared"]
+COPY ["new manthana radiology/manthana-backend/services/12_mammography", "/app"]
+
+ENV MANTHANA_LLM_REPO_ROOT=/app
+ENV PYTHONPATH=/app:/app/shared
+ENV CLOUD_INFERENCE_CONFIG_PATH=/app/config/cloud_inference.yaml
+ENV MODEL_DIR=/models
+
+EXPOSE 8012
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8012"]
