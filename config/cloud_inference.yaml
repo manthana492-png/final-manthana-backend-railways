@@ -43,6 +43,12 @@ roles:
       - "nvidia/nemotron-3-super-120b-a12b-20230311"
       - "arcee-ai/trinity-large-preview"
       - "moonshotai/kimi-k2.5:online"
+  # Oracle: short / low-latency follow-ups (full tier, intensity=quick)
+  oracle_chat_shallow:
+    model: "deepseek/deepseek-chat-v3-0324"
+    max_tokens: 4096
+    temperature: 0.15
+    fallback_models: *fb_short
   oracle_m5:
     model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
@@ -121,9 +127,20 @@ roles:
     max_tokens: 4096
     temperature: 0.1
     fallback_models: *fb_labs
+  # Final CXR report after MedGemma Q&A + TXRV scores (Kimi vision)
+  narrative_cxr_medgemma_final:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 4096
+    temperature: 0.1
+    fallback_models: *fb_vision
   narrative_ct:
     model: "moonshotai/kimi-k2.5:online"
     max_tokens: 4096
+    temperature: 0.1
+    fallback_models: *fb_labs
+  narrative_premium_ct:
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 8192
     temperature: 0.1
     fallback_models: *fb_labs
   narrative_mri:
