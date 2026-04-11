@@ -50,6 +50,7 @@ async def analyze_xray(
     job_id: str = Form(None),
     patient_id: str = Form(""),
     patient_context_json: Optional[str] = Form(None),
+    skip_llm_narrative: Optional[str] = Form(None),
 ):
     """Analyze any body X-ray — auto-detects region."""
     from body_detector import detect_body_region
@@ -64,7 +65,9 @@ async def analyze_xray(
             patient_context = json.loads(patient_context_json)
         except json.JSONDecodeError:
             patient_context = None
-    
+
+    skip_narr = str(skip_llm_narrative or "").strip().lower() in ("1", "true", "yes", "on")
+
     start = time.time()
 
     upload_dir = "/tmp/manthana_uploads"
@@ -90,7 +93,12 @@ async def analyze_xray(
         if region in ("chest", "thorax"):
             from inference import run_pipeline
 
-            result = run_pipeline(filepath, job_id, patient_context=patient_context)
+            result = run_pipeline(
+                filepath,
+                job_id,
+                patient_context=patient_context,
+                skip_llm_narrative=skip_narr,
+            )
         elif region in ("extremity", "hand", "wrist", "knee", "ankle", "elbow", "shoulder", "hip"):
             from pipeline_bone import run_bone_pipeline
             from inference import attach_narrative
@@ -135,7 +143,12 @@ async def analyze_xray(
             # Default to chest (most common)
             from inference import run_pipeline
 
-            result = run_pipeline(filepath, job_id, patient_context=patient_context)
+            result = run_pipeline(
+                filepath,
+                job_id,
+                patient_context=patient_context,
+                skip_llm_narrative=skip_narr,
+            )
             result["detected_region"] = f"{region} (defaulted to chest analysis)"
 
         result["detected_region"] = result.get("detected_region", region)

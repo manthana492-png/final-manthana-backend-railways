@@ -538,3 +538,47 @@ def _extract_json_from_response(text: str) -> dict:
 def classify_document(file_path: Union[str, Path]) -> str:
     result = parse_medical_document(file_path, document_type="auto")
     return result.get("document_type", "unknown")
+
+
+def medgemma_multimodal_generate(
+    messages: list,
+    *,
+    max_new_tokens: int = 2048,
+) -> str:
+    """
+    Run Google MedGemma-4B-IT on a multimodal chat (same template path as lab parsing).
+
+    ``messages`` must follow the Gemma chat format used elsewhere in this module, e.g.::
+
+        [
+          {"role": "system", "content": [{"type": "text", "text": "..."}]},
+          {"role": "user", "content": [{"type": "image", "image": pil_image}, {"type": "text", "text": "..."}]},
+        ]
+
+    Returns decoded assistant text (not JSON-validated).
+    """
+    import torch
+
+    model = _get_model()
+    processor = _get_processor()
+    if model is None or processor is None:
+        raise RuntimeError("MedGemma model or processor unavailable")
+
+    inputs = processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+    ).to(model.device, dtype=torch.bfloat16)
+
+    input_len = inputs["input_ids"].shape[-1]
+
+    with torch.inference_mode():
+        generation = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+        )
+    generation = generation[0][input_len:]
+    return processor.decode(generation, skip_special_tokens=True)

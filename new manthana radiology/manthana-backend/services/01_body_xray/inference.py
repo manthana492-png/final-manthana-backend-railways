@@ -60,9 +60,13 @@ def run_pipeline(
     job_id: str,
     patient_context: dict | None = None,
     image_b64: str | None = None,
+    *,
+    skip_llm_narrative: bool = False,
 ) -> dict:
     """
     Run chest X-ray analysis. Optional LLM narrative uses OpenRouter from env.
+    When ``skip_llm_narrative`` is True, returns TorchXRayVision + structured output only
+    (for the MedGemma middle-layer on a separate Modal app).
     """
     path = filepath
     if image_b64:
@@ -88,11 +92,12 @@ def run_pipeline(
             except OSError:
                 pass
 
-    out = attach_narrative(
-        out,
-        patient_context=patient_context,
-        image_b64=image_b64_for_llm,
-    )
+    if not skip_llm_narrative:
+        out = attach_narrative(
+            out,
+            patient_context=patient_context,
+            image_b64=image_b64_for_llm,
+        )
 
     return out
 
@@ -117,6 +122,7 @@ def run_cxr_pipeline_b64(
         job_id=jid,
         patient_context=ctx,
         image_b64=image_b64,
+        skip_llm_narrative=False,
     )
 
 

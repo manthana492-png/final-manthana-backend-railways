@@ -1,6 +1,6 @@
 """
 Shared Modal helpers for Manthana GPU services (CT/MRI, X-ray, USG, pathology, cytology, mammography, lab_report,
-**oral_cancer — production default**) and CPU scale-to-zero services (ECG, dermatology, optional **oral_cancer_cpu**).
+cxr_medgemma, **oral_cancer — production default**) and CPU scale-to-zero services (ECG, dermatology, optional **oral_cancer_cpu**).
 
 Deploy from `manthana-backend` root:
   modal deploy modal_app/deploy_ct_brain.py
@@ -231,7 +231,7 @@ def service_image_ct_brain_vista() -> modal.Image:
     return img.env(
         {
             "MODEL_DIR": "/models",
-            "VISTA3D_MODEL_PATH": "/models/vista3d/model.pt",
+            "VISTA3D_MODEL_PATH": "/models/vista3d/vista3d_pretrained_model/model.safetensors",
             "VISTA3D_ENABLED": "true",
             "MANTHANA_LLM_REPO_ROOT": "/app",
             "MANTHANA_USE_MONAI_CT_LOADER": "1",
@@ -245,7 +245,7 @@ def service_image_premium_ct() -> modal.Image:
     req = br / "services" / "20_premium_ct" / "requirements.txt"
     img = cuda_runtime_python311()
     img = img.pip_install_from_requirements(str(req))
-    img = with_monai_transforms(img)
+    # Do not call ``with_monai_transforms`` here — it pins monai==1.3.0 and would downgrade 1.4.0 from requirements.
     img = img.pip_install("huggingface_hub>=0.20.0")
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
@@ -253,7 +253,7 @@ def service_image_premium_ct() -> modal.Image:
     return img.env(
         {
             "MODEL_DIR": "/models",
-            "VISTA3D_MODEL_PATH": "/models/vista3d/model.pt",
+            "VISTA3D_MODEL_PATH": "/models/vista3d/vista3d_pretrained_model/model.safetensors",
             "VISTA3D_ENABLED": "true",
             "VISTA3D_FULL_FORWARD": "true",
             "MANTHANA_LLM_REPO_ROOT": "/app",
@@ -369,6 +369,28 @@ def service_image_lab_report() -> modal.Image:
             "MODEL_DIR": "/models",
             "MANTHANA_MODEL_CACHE": "/models",
             "DEVICE": "cuda",
+        }
+    )
+
+
+def service_image_cxr_medgemma() -> modal.Image:
+    """
+    CXR MedGemma middle layer: google/medgemma-4b-it + Kimi final narrative.
+    Deploy separately from ``manthana-body-xray`` (TorchXRayVision stays on the X-ray app).
+    """
+    br = backend_root()
+    req = br / "services" / "21_cxr_medgemma" / "requirements.txt"
+    img = cuda_runtime_python311()
+    img = img.pip_install_from_requirements(str(req))
+    img = with_manthana_llm_stack(img)
+    img = copy_shared(img, br)
+    img = img.add_local_dir(str(br / "services" / "21_cxr_medgemma"), remote_path="/app", copy=True)
+    return img.env(
+        {
+            "MODEL_DIR": "/models",
+            "MANTHANA_MODEL_CACHE": "/models",
+            "DEVICE": "cuda",
+            "PORT": "8019",
         }
     )
 

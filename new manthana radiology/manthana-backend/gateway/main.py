@@ -20,9 +20,11 @@ import httpx
 import logging
 import zipfile
 from pathlib import Path
-from typing import Annotated, List, Optional, Union
+from typing import Annotated, Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
+from pydantic import BaseModel, Field
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Body
 from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -257,6 +259,18 @@ REPORT_ASSEMBLY_URL = os.getenv(
     "REPORT_ASSEMBLY_URL", "http://report_assembly:8020"
 ).rstrip("/")
 
+# MedGemma CXR middle layer (Modal workspace 2 or dedicated container). No trailing slash.
+CXR_MEDGEMMA_SERVICE_URL = os.getenv(
+    "CXR_MEDGEMMA_SERVICE_URL", "http://cxr_medgemma:8019"
+).rstrip("/")
+
+
+class CxrMedgemmaCompleteBody(BaseModel):
+    session_id: str = Field(..., min_length=8)
+    answers: Optional[Dict[str, Any]] = None
+    skip_all: bool = False
+
+
 # CT/MRI modalities that accept ZIP or multi-file film-photo batches (gateway bundles extras into one ZIP).
 _FILM_PHOTO_GATEWAY_MODALITIES = frozenset(
     {"ct_brain", "brain_mri", "cardiac_ct", "spine_neuro", "abdominal_ct"}
@@ -334,6 +348,10 @@ async def analyze(
     patient_context_json: Optional[str] = Form(
         None,
         description="Optional JSON object with patient context (e.g. dermatology age/sex/location)",
+    ),
+    skip_llm_narrative: Optional[str] = Form(
+        None,
+        description="Chest X-ray only: if true, body_xray returns TXRV output without Kimi narrative (MedGemma flow).",
     ),
     film_files: Annotated[
         Optional[List[UploadFile]],
@@ -482,17 +500,25 @@ async def analyze(
         async with httpx.AsyncClient(timeout=600.0) as client:
             for attempt in range(3):
                 with open(forward_path, "rb") as f:
+                    fwd: dict = {
+                        "job_id": job_id,
+                        "patient_id": patient_id or "",
+                        "series_dir": series_dir or "",
+                        "clinical_notes": clinical_notes or "",
+                        "source_modality": source_modality or "",
+                        "patient_context_json": patient_context_json or "",
+                    }
+                    if canon == "xray" and str(skip_llm_narrative or "").strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    ):
+                        fwd["skip_llm_narrative"] = "true"
                     response = await client.post(
                         service_url,
                         files={"file": (forward_name, f, forward_mime)},
-                        data={
-                            "job_id": job_id,
-                            "patient_id": patient_id or "",
-                            "series_dir": series_dir or "",
-                            "clinical_notes": clinical_notes or "",
-                            "source_modality": source_modality or "",
-                            "patient_context_json": patient_context_json or "",
-                        },
+                        data=fwd,
                         headers={"X-Request-ID": rid},
                     )
                 if response.status_code not in (502, 503) or attempt >= 2:
@@ -855,6 +881,81 @@ async def unified_report(
             status_code=504,
             detail="Unified report generation timed out. Please try again.",
         )
+
+
+@app.post("/cxr-medgemma/session/start")
+async def cxr_medgemma_session_start(
+    file: UploadFile = File(...),
+    pathology_scores_json: str = Form(...),
+    patient_context_json: Optional[str] = Form(None),
+    token_data: dict = Depends(verify_token),
+):
+    """Proxy to CXR MedGemma service (TXRV scores + image + context → questions)."""
+    if not CXR_MEDGEMMA_SERVICE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail="CXR_MEDGEMMA_SERVICE_URL is not configured.",
+        )
+    url = f"{CXR_MEDGEMMA_SERVICE_URL}/medgemma-cxr/session/start"
+    raw = await file.read()
+    files = {
+        "file": (
+            file.filename or "upload.bin",
+            raw,
+            file.content_type or "application/octet-stream",
+        )
+    }
+    data: dict = {"pathology_scores_json": pathology_scores_json}
+    if patient_context_json is not None:
+        data["patient_context_json"] = patient_context_json
+    timeout = httpx.Timeout(600.0, connect=60.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, files=files, data=data)
+    except httpx.ConnectError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CXR MedGemma service unreachable: {e}",
+        ) from e
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail="CXR MedGemma request timed out.") from e
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.text[:4000] or "upstream error",
+        )
+    return resp.json()
+
+
+@app.post("/cxr-medgemma/session/complete")
+async def cxr_medgemma_session_complete(
+    body: Annotated[CxrMedgemmaCompleteBody, Body()],
+    token_data: dict = Depends(verify_token),
+):
+    """Proxy finalize: answers → Kimi final narrative."""
+    if not CXR_MEDGEMMA_SERVICE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail="CXR_MEDGEMMA_SERVICE_URL is not configured.",
+        )
+    url = f"{CXR_MEDGEMMA_SERVICE_URL}/medgemma-cxr/session/complete"
+    timeout = httpx.Timeout(300.0, connect=30.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=body.model_dump())
+    except httpx.ConnectError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CXR MedGemma service unreachable: {e}",
+        ) from e
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail="CXR MedGemma finalize timed out.") from e
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.text[:4000] or "upstream error",
+        )
+    return resp.json()
 
 
 # ════════════════════════════════════════════════════════

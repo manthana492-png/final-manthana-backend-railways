@@ -64,6 +64,7 @@ modal deploy modal_app/deploy_cytology.py
 modal deploy modal_app/deploy_mammography.py
 modal deploy modal_app/deploy_lab_report.py
 modal deploy modal_app/deploy_oral_cancer.py
+modal deploy modal_app/deploy_cxr_medgemma.py
 ```
 
 Copy each HTTPS URL Modal prints. Full analyze URL shape: `https://….modal.run` (Modal serves the ASGI app at `/analyze/...`).
@@ -86,6 +87,7 @@ Set environment variables on the gateway service:
 | `CYTOLOGY_SERVICE_URL` | `https://….modal.run/analyze/cytology` |
 | `MAMMOGRAPHY_SERVICE_URL` | `https://….modal.run/analyze/mammography` |
 | `LAB_REPORT_SERVICE_URL` | `https://….modal.run/analyze/lab_report` |
+| `CXR_MEDGEMMA_SERVICE_URL` | `https://….modal.run` — **base only** (no `/analyze/…`; gateway calls `/medgemma-cxr/session/…`) |
 | `DERMATOLOGY_SERVICE_URL` | `https://your-derm.railway.app/analyze/dermatology` (CPU service; not Modal by default) |
 | `ORAL_CANCER_SERVICE_URL` | **Production:** `https://….modal.run/analyze/oral_cancer` from **`modal deploy modal_app/deploy_oral_cancer.py`** (GPU T4). Optional: CPU app or Railway. |
 | `REPORT_ASSEMBLY_URL` | `https://your-report-service.railway.app` (no path suffix) |
