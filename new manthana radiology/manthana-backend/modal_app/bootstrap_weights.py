@@ -8,7 +8,11 @@ Optional (env ``MANTHANA_BOOTSTRAP``):
   MANTHANA_BOOTSTRAP=monai  — MONAI Model Zoo bundles under /models/monai_bundles
   MANTHANA_BOOTSTRAP=vista — VISTA-3D / foundation checkpoints under /models/vista3d
 
-Default (unset or ``totalseg``): TotalSegmentator nnU-Net tasks.
+Default (unset or ``totalseg``): TotalSegmentator open tasks only (**``total``**, **``total_mr``**).
+Tasks like **``vertebrae_body``** / **``heartchambers``** need a TotalSegmentator academic or commercial
+license (`https://backend.totalsegmentator.com/license-academic/`). Set **``TOTALSEG_LICENSE_NUMBER``**
+(18-character key from that site) in the environment before ``modal run``, and optionally
+**``MANTHANA_TOTALSEG_BOOTSTRAP_TASKS=total,total_mr,vertebrae_body``** to extend the list.
 """
 
 from __future__ import annotations
@@ -17,7 +21,16 @@ import os
 
 import modal
 
-from modal_app.common import MODELS_VOLUME_NAME, models_volume
+# Do not import modal_app.common: ``modal run`` loads this file alone in the worker
+# (/root/bootstrap_weights.py) without the modal_app package on PYTHONPATH.
+# Keep MODELS_VOLUME_NAME / models_volume() aligned with modal_app/common.py.
+MODELS_VOLUME_NAME = os.environ.get("MANTHANA_MODAL_VOLUME", "manthana-model-weights")
+MODAL_SECRET_NAME = os.environ.get("MANTHANA_MODAL_SECRET", "manthana-env")
+
+
+def models_volume() -> modal.Volume:
+    return modal.Volume.from_name(MODELS_VOLUME_NAME, create_if_missing=True)
+
 
 app = modal.App("manthana-bootstrap-weights")
 
@@ -43,6 +56,7 @@ _monai_torch_image = (
 @app.function(
     image=_bootstrap_image,
     volumes={"/models": models_volume()},
+    secrets=[modal.Secret.from_name(MODAL_SECRET_NAME)],
     timeout=3600,
     cpu=8.0,
     memory=16384,
@@ -57,25 +71,47 @@ def bootstrap_totalsegmentator_weights() -> dict:
     nib.save(nib.Nifti1Image(data, np.eye(4)), nii_path)
     os.environ["MODEL_DIR"] = "/models"
 
+    from totalsegmentator.config import set_license_number, setup_totalseg
     from totalsegmentator.python_api import totalsegmentator
 
-    tasks = ["total", "total_mr", "heartchambers", "vertebrae_body"]
+    setup_totalseg()
+    lic = (os.environ.get("TOTALSEG_LICENSE_NUMBER") or "").strip()
+    if lic:
+        # Offline length check inside TotalSegmentator; avoids network during image build.
+        set_license_number(lic, skip_validation=True)
+
+    raw = (os.environ.get("MANTHANA_TOTALSEG_BOOTSTRAP_TASKS") or "total,total_mr").strip()
+    tasks = [t.strip() for t in raw.split(",") if t.strip()]
+
     done: list[str] = []
     errors: dict[str, str] = {}
     for task in tasks:
         out_dir = f"/models/_bootstrap/out_{task.replace(' ', '_')}"
         os.makedirs(out_dir, exist_ok=True)
+        use_fast = task in ("total", "total_mr")
         try:
-            totalsegmentator(nii_path, out_dir, task=task, fast=True, device="cpu")
+            totalsegmentator(
+                nii_path,
+                out_dir,
+                task=task,
+                fast=use_fast,
+                device="cpu",
+            )
             done.append(task)
-        except Exception as e:  # noqa: BLE001
-            errors[task] = str(e)[:500]
+        except BaseException as e:  # noqa: BLE001 — TotalSegmentator calls sys.exit on license errors
+            code = getattr(e, "code", None)
+            suffix = f" (code={code!r})" if code is not None else ""
+            errors[task] = (f"{type(e).__name__}: {e}{suffix}")[:500]
 
     return {
         "volume": MODELS_VOLUME_NAME,
         "tasks_ok": done,
         "tasks_failed": errors,
-        "hint": "Upload CT brain / WMH / lesion weights with: modal volume put ...",
+        "hint": (
+            "Upload CT brain / WMH / lesion weights with: modal volume put ... "
+            "| Licensed TotSeg tasks: set TOTALSEG_LICENSE_NUMBER then "
+            "MANTHANA_TOTALSEG_BOOTSTRAP_TASKS=total,total_mr,vertebrae_body,heartchambers"
+        ),
     }
 
 
@@ -161,7 +197,11 @@ def main():
     mode = os.environ.get("MANTHANA_BOOTSTRAP", "totalseg").strip().lower()
     if mode == "monai":
         print(bootstrap_monai_bundles.remote())
-    elif mode in ("vista", "vista3d"):
+    elif mode in ("vista", "vista3d", "vista-full", "premium-ct"):
+        if mode in ("vista-full", "premium-ct"):
+            print("Downloading full VISTA-3D 127-class foundation model...")
         print(bootstrap_vista3d_weights.remote())
+        if mode in ("vista-full", "premium-ct"):
+            print("Premium CT ready for 127-class segmentation")
     else:
         print(bootstrap_totalsegmentator_weights.remote())

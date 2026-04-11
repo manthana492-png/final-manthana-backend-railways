@@ -177,6 +177,9 @@ def _canonical_modality(modality: str) -> str:
     return ALIASES.get(m, m)
 
 
+_PREMIUM_MODALITIES = frozenset({"ct_brain_vista", "premium_ct_unified"})
+
+
 def _build_findings_dict_for_assemble(req: SingleReportRequest) -> dict:
     """Map SingleReportRequest → one dict for report_assembly `findings` field."""
     if isinstance(req.findings, dict):
@@ -363,11 +366,19 @@ async def analyze(
 
     canon = _canonical_modality(modality)
 
-    # Premium modalities (VISTA-3D CT brain): require paid tier on gateway (do not trust UI alone).
-    _PREMIUM_MODALITIES = frozenset({"ct_brain_vista"})
+    # Premium modalities are enforced in gateway (do not trust UI alone).
     if canon in _PREMIUM_MODALITIES:
         sub_tier = (request.headers.get("X-Subscription-Tier") or "free").strip().lower()
-        if sub_tier not in ("pro", "proplus", "premium", "enterprise"):
+        if canon == "premium_ct_unified":
+            if sub_tier not in ("premium", "enterprise"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Premium 3D CT requires Premium (₹3999) or Enterprise subscription. "
+                        f"Current tier: {sub_tier}."
+                    ),
+                )
+        elif sub_tier not in ("pro", "proplus", "premium", "enterprise"):
             raise HTTPException(
                 status_code=403,
                 detail=(

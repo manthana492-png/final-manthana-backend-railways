@@ -1,6 +1,7 @@
-"""
-Manthana — CT Brain (NCCT) head CT service.
-"""
+"""Manthana — Premium unified 3D CT service (full VISTA-3D path)."""
+
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -14,35 +15,14 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 try:
     from manthana_paths import backend_root_from_service_file
 except ImportError:
-    import importlib.util
 
-    _here = Path(__file__).resolve()
-    _helpers = []
-    if Path("/app/shared/manthana_paths.py").is_file():
-        _helpers.append(Path("/app/shared/manthana_paths.py"))
-    try:
-        _hp = _here.parents[2] / "shared" / "manthana_paths.py"
-        if _hp.is_file():
-            _helpers.append(_hp)
-    except IndexError:
-        pass
-    backend_root_from_service_file = None  # type: ignore[assignment]
-    for _hp in _helpers:
-        _spec = importlib.util.spec_from_file_location("_manthana_paths", _hp)
-        if _spec and _spec.loader:
-            _mod = importlib.util.module_from_spec(_spec)
-            _spec.loader.exec_module(_mod)
-            backend_root_from_service_file = _mod.backend_root_from_service_file  # type: ignore[assignment]
-            break
-    if backend_root_from_service_file is None:
-
-        def backend_root_from_service_file(p: Path | str) -> Path:  # type: ignore[no-redef]
-            x = Path(p).resolve()
-            if os.environ.get("MANTHANA_BACKEND_ROOT"):
-                return Path(os.environ["MANTHANA_BACKEND_ROOT"])
-            if Path("/app/shared").is_dir() and x.parent == Path("/app"):
-                return Path("/app")
-            return x.parents[2]
+    def backend_root_from_service_file(p: Path | str) -> Path:
+        x = Path(p).resolve()
+        if os.environ.get("MANTHANA_BACKEND_ROOT"):
+            return Path(os.environ["MANTHANA_BACKEND_ROOT"])
+        if Path("/app/shared").is_dir() and x.parent == Path("/app"):
+            return Path("/app")
+        return x.parents[2]
 
 
 _root = backend_root_from_service_file(__file__)
@@ -64,33 +44,31 @@ async def health():
     from inference import is_loaded
 
     ch = is_loaded()
-    ready_inf = bool(ch.get("ci_dummy_enabled") or ch.get("torchscript_file_present"))
+    ready_inf = bool(ch.get("vista3d_enabled") and ch.get("vista3d_checkpoint_present"))
     return {
         "service": SERVICE_NAME,
         "status": "ok" if ready_inf else "degraded",
+        "models_loaded": ready_inf,
         "component_health": ch,
         "gpu_available": torch.cuda.is_available(),
+        "version": "1.0.0",
     }
 
 
 @app.get("/ready")
 async def ready():
-    from fastapi import HTTPException
-
     from inference import is_loaded
 
     ch = is_loaded()
-    if ch.get("ci_dummy_enabled"):
-        return {"ready": True, **ch}
-    if ch.get("torchscript_configured") and ch.get("torchscript_file_present"):
+    if ch.get("vista3d_enabled") and ch.get("vista3d_checkpoint_present"):
         return {"ready": True, **ch}
     raise HTTPException(
         status_code=503,
-        detail="CT Brain service not ready: set CT_BRAIN_TORCHSCRIPT_PATH or CT_BRAIN_CI_DUMMY_MODEL=1 for tests.",
+        detail="Premium CT service not ready: VISTA3D model checkpoint missing.",
     )
 
 
-@app.post("/analyze/ct_brain")
+@app.post("/analyze/premium_ct")
 async def analyze(
     file: UploadFile = File(...),
     job_id: str = Form(None),
@@ -111,6 +89,7 @@ async def analyze(
     fp = os.path.join(upload_dir, f"{job_id}{ext}")
     with open(fp, "wb") as f:
         f.write(await file.read())
+
     patient_ctx: dict = {}
     if patient_context_json and patient_context_json.strip():
         try:
@@ -119,6 +98,7 @@ async def analyze(
                 patient_ctx = parsed
         except json.JSONDecodeError:
             patient_ctx = {}
+
     cleanup_dirs: list[str] = []
     try:
         if series_dir and os.path.isdir(series_dir):
@@ -129,12 +109,11 @@ async def analyze(
             pipeline_path,
             job_id,
             series_dir=series_dir or "",
-            source_modality=source_modality or "",
             patient_context=patient_ctx or None,
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
     finally:
         for d in cleanup_dirs:
@@ -148,3 +127,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+

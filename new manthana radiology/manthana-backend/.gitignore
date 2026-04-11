@@ -1,6 +1,9 @@
 # Environment
 .env
 *.env.local
+# Local copy with real keys — push to Modal only, never commit
+modal_app/manthana-modal-secret.env
+manthana-modal-secret.env
 
 # Python
 __pycache__/

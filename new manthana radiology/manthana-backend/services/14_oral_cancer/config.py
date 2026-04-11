@@ -20,12 +20,15 @@ EFFNET_V2M_CHECKPOINT = os.getenv(
 ORAL_PREFER_V2M = os.getenv("ORAL_PREFER_V2M", "").strip()
 
 # V2-M head width must match the checkpoint (2 = binary normal vs malignant, 3 = Normal/OPMD/OSCC).
-ORAL_V2M_NUM_CLASSES = int(os.getenv("ORAL_V2M_NUM_CLASSES", "3"))
+# Secret files often set ORAL_V2M_NUM_CLASSES= (empty); getenv returns "" and int("") crashes — treat blank as unset.
+_v2m_cls = (os.getenv("ORAL_V2M_NUM_CLASSES") or "").strip()
+ORAL_V2M_NUM_CLASSES = int(_v2m_cls) if _v2m_cls else 3
 if ORAL_V2M_NUM_CLASSES not in (2, 3):
     ORAL_V2M_NUM_CLASSES = 3
 
 # When ORAL_V2M_NUM_CLASSES=2: fraction of malignant mass assigned to OPMD (rest to OSCC-suspicious).
-ORAL_V2M_BINARY_OPMD_FRACTION = float(os.getenv("ORAL_V2M_BINARY_OPMD_FRACTION", "0.45"))
+_v2m_frac = (os.getenv("ORAL_V2M_BINARY_OPMD_FRACTION") or "").strip()
+ORAL_V2M_BINARY_OPMD_FRACTION = float(_v2m_frac) if _v2m_frac else 0.45
 ORAL_V2M_BINARY_OPMD_FRACTION = min(0.95, max(0.05, ORAL_V2M_BINARY_OPMD_FRACTION))
 
 # Histopathology — UNI encoder (Hugging Face); optional linear head on disk

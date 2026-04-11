@@ -25,13 +25,24 @@ MODAL_SECRET_NAME = os.environ.get("MANTHANA_MODAL_SECRET", "manthana-env")
 
 
 def backend_root() -> Path:
-    """manthana-backend directory."""
+    """manthana-backend directory (on Modal worker: ``/app``)."""
+    override = os.environ.get("MANTHANA_BACKEND_ROOT")
+    if override:
+        return Path(override)
     return Path(__file__).resolve().parent.parent
 
 
 def studio_root() -> Path:
-    """this_studio (parent of new manthana radiology)."""
-    return Path(__file__).resolve().parents[3]
+    """``this_studio`` on dev machines; on Modal images ``packages/`` + ``config/`` live under ``/app``."""
+    override = os.environ.get("MANTHANA_STUDIO_ROOT")
+    if override:
+        return Path(override)
+    br = backend_root()
+    # Image layout copies manthana-inference to /app/packages/... (same root as services).
+    if (br / "packages" / "manthana-inference").is_dir():
+        return br
+    f = Path(__file__).resolve()
+    return f.parents[3]
 
 
 def models_volume() -> modal.Volume:
@@ -85,8 +96,8 @@ def with_manthana_llm_stack(img: modal.Image) -> modal.Image:
     if not cfg.is_file():
         raise RuntimeError(f"cloud_inference.yaml not found at {cfg}")
     return (
-        img.copy_local_dir(str(pkg), "/app/packages/manthana-inference")
-        .copy_local_file(str(cfg), "/app/config/cloud_inference.yaml")
+        img.add_local_dir(str(pkg), remote_path="/app/packages/manthana-inference", copy=True)
+        .add_local_file(str(cfg), "/app/config/cloud_inference.yaml", copy=True)
         .run_commands(
             "pip install -e /app/packages/manthana-inference",
             "pip install 'instructor>=1.0.0'",
@@ -95,8 +106,24 @@ def with_manthana_llm_stack(img: modal.Image) -> modal.Image:
 
 
 def copy_shared(img: modal.Image, br: Path | None = None) -> modal.Image:
+    """Shared code plus ``modal_app`` package on ``PYTHONPATH`` for Modal workers.
+
+    Deploy entrypoints are hydrated as ``/root/deploy_*.py`` (no parent package). They still
+    execute ``from modal_app.common import …`` at import time, so the image must ship
+    ``/app/modal_app/…`` and ``PYTHONPATH=/app`` so ``modal_app`` resolves in the worker.
+    """
     br = br or backend_root()
-    return img.copy_local_dir(str(br / "shared"), "/app/shared")
+    return (
+        img.add_local_dir(str(br / "shared"), remote_path="/app/shared", copy=True)
+        .add_local_dir(str(br / "modal_app"), remote_path="/app/modal_app", copy=True)
+        .env(
+            {
+                "PYTHONPATH": "/app",
+                "MANTHANA_BACKEND_ROOT": "/app",
+                "MANTHANA_STUDIO_ROOT": "/app",
+            }
+        )
+    )
 
 
 def with_monai_transforms(img: modal.Image) -> modal.Image:
@@ -125,7 +152,7 @@ def service_image_ct_brain() -> modal.Image:
     img = with_monai_transforms(img)
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    return img.copy_local_dir(str(br / "services" / "11_ct_brain"), "/app").env(
+    return img.add_local_dir(str(br / "services" / "11_ct_brain"), remote_path="/app", copy=True).env(
         {"MANTHANA_USE_MONAI_CT_LOADER": "1"}
     )
 
@@ -140,7 +167,7 @@ def service_image_brain_mri() -> modal.Image:
     img = with_monai_transforms(img)
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    return img.copy_local_dir(str(br / "services" / "02_brain_mri"), "/app").env(
+    return img.add_local_dir(str(br / "services" / "02_brain_mri"), remote_path="/app", copy=True).env(
         {"MANTHANA_USE_MONAI_CT_LOADER": "1"}
     )
 
@@ -155,7 +182,7 @@ def service_image_cardiac_ct() -> modal.Image:
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
     img = install_comp2comp_opt(img)
-    return img.copy_local_dir(str(br / "services" / "04_cardiac_ct"), "/app").env(
+    return img.add_local_dir(str(br / "services" / "04_cardiac_ct"), remote_path="/app", copy=True).env(
         {"MANTHANA_USE_MONAI_CT_LOADER": "1"}
     )
 
@@ -170,7 +197,7 @@ def service_image_spine_neuro() -> modal.Image:
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
     img = install_comp2comp_opt(img)
-    return img.copy_local_dir(str(br / "services" / "10_spine_neuro"), "/app").env(
+    return img.add_local_dir(str(br / "services" / "10_spine_neuro"), remote_path="/app", copy=True).env(
         {"MANTHANA_USE_MONAI_CT_LOADER": "1"}
     )
 
@@ -185,7 +212,7 @@ def service_image_abdominal_ct() -> modal.Image:
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
     img = install_comp2comp_opt(img)
-    return img.copy_local_dir(str(br / "services" / "08_abdominal_ct"), "/app").env(
+    return img.add_local_dir(str(br / "services" / "08_abdominal_ct"), remote_path="/app", copy=True).env(
         {"MANTHANA_USE_MONAI_CT_LOADER": "1"}
     )
 
@@ -200,12 +227,35 @@ def service_image_ct_brain_vista() -> modal.Image:
     img = img.pip_install("huggingface_hub>=0.20.0")
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "11_ct_brain"), "/app")
+    img = img.add_local_dir(str(br / "services" / "11_ct_brain"), remote_path="/app", copy=True)
     return img.env(
         {
             "MODEL_DIR": "/models",
             "VISTA3D_MODEL_PATH": "/models/vista3d/model.pt",
             "VISTA3D_ENABLED": "true",
+            "MANTHANA_LLM_REPO_ROOT": "/app",
+            "MANTHANA_USE_MONAI_CT_LOADER": "1",
+        }
+    )
+
+
+def service_image_premium_ct() -> modal.Image:
+    """Premium CT image with full VISTA-3D stack and MONAI runtime."""
+    br = backend_root()
+    req = br / "services" / "20_premium_ct" / "requirements.txt"
+    img = cuda_runtime_python311()
+    img = img.pip_install_from_requirements(str(req))
+    img = with_monai_transforms(img)
+    img = img.pip_install("huggingface_hub>=0.20.0")
+    img = with_manthana_llm_stack(img)
+    img = copy_shared(img, br)
+    img = img.add_local_dir(str(br / "services" / "20_premium_ct"), remote_path="/app", copy=True)
+    return img.env(
+        {
+            "MODEL_DIR": "/models",
+            "VISTA3D_MODEL_PATH": "/models/vista3d/model.pt",
+            "VISTA3D_ENABLED": "true",
+            "VISTA3D_FULL_FORWARD": "true",
             "MANTHANA_LLM_REPO_ROOT": "/app",
             "MANTHANA_USE_MONAI_CT_LOADER": "1",
         }
@@ -220,7 +270,7 @@ def service_image_body_xray() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "01_body_xray"), "/app")
+    img = img.add_local_dir(str(br / "services" / "01_body_xray"), remote_path="/app", copy=True)
     img = img.run_commands(
         "python -c \""
         "import torchxrayvision as xrv; "
@@ -244,7 +294,7 @@ def service_image_ultrasound() -> modal.Image:
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
     img = img.env({"MANTHANA_MODEL_CACHE": cache})
-    img = img.copy_local_dir(str(br / "services" / "09_ultrasound"), "/app")
+    img = img.add_local_dir(str(br / "services" / "09_ultrasound"), remote_path="/app", copy=True)
     img = img.run_commands(
         f"mkdir -p {cache} && python -c \""
         "from transformers import AutoImageProcessor, AutoModel; "
@@ -264,7 +314,7 @@ def service_image_pathology() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "05_pathology"), "/app")
+    img = img.add_local_dir(str(br / "services" / "05_pathology"), remote_path="/app", copy=True)
     img = img.run_commands(
         "python -c \""
         "import timm; "
@@ -283,7 +333,7 @@ def service_image_cytology() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "11_cytology"), "/app")
+    img = img.add_local_dir(str(br / "services" / "11_cytology"), remote_path="/app", copy=True)
     img = img.run_commands(
         "python -c \""
         "import timm; "
@@ -301,7 +351,7 @@ def service_image_mammography() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "12_mammography"), "/app")
+    img = img.add_local_dir(str(br / "services" / "12_mammography"), remote_path="/app", copy=True)
     return img.env({"MODEL_DIR": "/models", "DEVICE": "cuda"})
 
 
@@ -313,7 +363,7 @@ def service_image_lab_report() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "15_lab_report"), "/app")
+    img = img.add_local_dir(str(br / "services" / "15_lab_report"), remote_path="/app", copy=True)
     return img.env(
         {
             "MODEL_DIR": "/models",
@@ -331,7 +381,7 @@ def service_image_oral_cancer() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "14_oral_cancer"), "/app")
+    img = img.add_local_dir(str(br / "services" / "14_oral_cancer"), remote_path="/app", copy=True)
     img = img.run_commands(
         "python -c \""
         "from transformers import EfficientNetImageProcessor; "
@@ -390,7 +440,7 @@ def service_image_ecg_cpu() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    return img.copy_local_dir(str(br / "services" / "13_ecg"), "/app").env(
+    return img.add_local_dir(str(br / "services" / "13_ecg"), remote_path="/app", copy=True).env(
         {
             "DEVICE": "cpu",
             "MANTHANA_LLM_REPO_ROOT": "/app",
@@ -406,7 +456,7 @@ def service_image_dermatology_cpu() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    return img.copy_local_dir(str(br / "services" / "16_dermatology"), "/app").env(
+    return img.add_local_dir(str(br / "services" / "16_dermatology"), remote_path="/app", copy=True).env(
         {
             "DEVICE": "cpu",
             "MANTHANA_LLM_REPO_ROOT": "/app",
@@ -422,7 +472,7 @@ def service_image_oral_cancer_cpu() -> modal.Image:
     img = img.pip_install_from_requirements(str(req))
     img = with_manthana_llm_stack(img)
     img = copy_shared(img, br)
-    img = img.copy_local_dir(str(br / "services" / "14_oral_cancer"), "/app")
+    img = img.add_local_dir(str(br / "services" / "14_oral_cancer"), remote_path="/app", copy=True)
     img = img.run_commands(
         "python -c \""
         "from transformers import EfficientNetImageProcessor; "

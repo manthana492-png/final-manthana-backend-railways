@@ -12,7 +12,7 @@ GPU inference uses [Modal](https://modal.com): scale-to-zero, persistent `Volume
 
 2. **Modal**: `pip install -r modal_requirements.txt` from `manthana-backend`, then `modal token new`.
 
-3. **Secret** in Modal dashboard named `manthana-env` (override with `MANTHANA_MODAL_SECRET`) including at least:
+3. **Secret** in Modal dashboard named `manthana-env` (override with `MANTHANA_MODAL_SECRET`), or use the full template: copy [`modal_app/manthana-modal-secret.env.example`](./manthana-modal-secret.env.example) → `modal_app/manthana-modal-secret.env`, fill values, then `python -m modal secret create manthana-env --force --from-dotenv modal_app/manthana-modal-secret.env`. Minimum keys include:
 
    - `OPENROUTER_API_KEY`
    - `MODEL_DIR=/models`

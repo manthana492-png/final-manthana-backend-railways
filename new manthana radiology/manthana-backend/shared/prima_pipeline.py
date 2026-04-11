@@ -13,6 +13,24 @@ from typing import Any
 
 logger = logging.getLogger("manthana.prima_pipeline")
 
+
+def is_prima_available() -> bool:
+    """True when Prima env and weights look usable (aligned with ``02_brain_mri`` service wrapper).
+
+    Brain MRI ``inference.py`` prepends ``shared/`` on ``sys.path``, so ``import prima_pipeline``
+    resolves to **this** module; the service-local ``prima_pipeline.py`` would otherwise be
+    shadowed. Keep this symbol here to avoid ``ImportError`` at cold start.
+    """
+    cfg = os.getenv("PRIMA_CONFIG_YAML", "").strip()
+    repo = os.getenv("PRIMA_REPO_DIR", "/opt/Prima").strip()
+    if not cfg or not os.path.isfile(cfg):
+        return False
+    if not os.path.isdir(repo):
+        return False
+    weights_path = os.path.join(repo, "primafullmodel107.pt")
+    return os.path.isfile(weights_path)
+
+
 # Curated summary keys (when Prima returns 52-class logits)
 PRIMA_SUMMARY_LABELS = frozenset(
     {

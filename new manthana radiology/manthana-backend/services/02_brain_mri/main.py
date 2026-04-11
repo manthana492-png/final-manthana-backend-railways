@@ -15,7 +15,41 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 _MAX_UPLOAD_MB = float(os.environ.get("MAX_UPLOAD_MB_BRAIN_MRI", "512") or "512")
 _MAX_UPLOAD_BYTES = int(_MAX_UPLOAD_MB * 1024 * 1024)
 
-_root = Path(__file__).resolve().parents[2]
+try:
+    from manthana_paths import backend_root_from_service_file
+except ImportError:
+    import importlib.util
+
+    _here = Path(__file__).resolve()
+    _helpers = []
+    if Path("/app/shared/manthana_paths.py").is_file():
+        _helpers.append(Path("/app/shared/manthana_paths.py"))
+    try:
+        _hp = _here.parents[2] / "shared" / "manthana_paths.py"
+        if _hp.is_file():
+            _helpers.append(_hp)
+    except IndexError:
+        pass
+    backend_root_from_service_file = None  # type: ignore[assignment]
+    for _hp in _helpers:
+        _spec = importlib.util.spec_from_file_location("_manthana_paths", _hp)
+        if _spec and _spec.loader:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            backend_root_from_service_file = _mod.backend_root_from_service_file  # type: ignore[assignment]
+            break
+    if backend_root_from_service_file is None:
+
+        def backend_root_from_service_file(p: Path | str) -> Path:  # type: ignore[no-redef]
+            x = Path(p).resolve()
+            if os.environ.get("MANTHANA_BACKEND_ROOT"):
+                return Path(os.environ["MANTHANA_BACKEND_ROOT"])
+            if Path("/app/shared").is_dir() and x.parent == Path("/app"):
+                return Path("/app")
+            return x.parents[2]
+
+
+_root = backend_root_from_service_file(__file__)
 for _shared in (_root / "shared", Path("/app/shared")):
     if _shared.is_dir():
         p = str(_shared)

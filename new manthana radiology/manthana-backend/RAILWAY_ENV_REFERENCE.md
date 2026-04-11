@@ -47,6 +47,7 @@ Set each used modality to the Modal deployment URL (from `modal deploy`):
 | `ABDOMINAL_CT_SERVICE_URL` | `…/analyze/abdominal_ct` |
 | `CT_BRAIN_SERVICE_URL` | `…/analyze/ct_brain` |
 | `CT_BRAIN_VISTA_SERVICE_URL` | `…/analyze/ct_brain` on the **VISTA-3D** Modal host (`manthana-ct-brain-vista`); same path as standard CT brain |
+| `PREMIUM_CT_SERVICE_URL` | `…/analyze/premium_ct` on the **premium unified VISTA** Modal host (`manthana-premium-ct`) |
 | `PATHOLOGY_SERVICE_URL` | `…/analyze/pathology` |
 | `ULTRASOUND_SERVICE_URL` | `…/analyze/ultrasound` |
 | `CYTOLOGY_SERVICE_URL` | `…/analyze/cytology` |
@@ -56,7 +57,9 @@ Set each used modality to the Modal deployment URL (from `modal deploy`):
 | `LAB_REPORT_SERVICE_URL` | `…/analyze/lab_report` |
 | `DERMATOLOGY_SERVICE_URL` | `…/analyze/dermatology` |
 
-**Premium:** For modality `ct_brain_vista`, the Vercel client sends `X-Subscription-Tier` (`pro`, `proplus`, `premium`, `enterprise`). The gateway returns **403** if the tier is not allowed.
+**Premium:**  
+- `ct_brain_vista` accepts `X-Subscription-Tier` in (`pro`, `proplus`, `premium`, `enterprise`).  
+- `premium_ct_unified` accepts only (`premium`, `enterprise`) and returns **403** otherwise.
 
 ### Optional
 

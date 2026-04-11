@@ -49,6 +49,10 @@ SERVICE_MAP = {
         "CT_BRAIN_VISTA_SERVICE_URL",
         "http://ct_brain:8017/analyze/ct_brain",
     ),
+    "premium_ct_unified": _service_url(
+        "PREMIUM_CT_SERVICE_URL",
+        "http://premium_ct:8018/analyze/premium_ct",
+    ),
     "cytology": _service_url(
         "CYTOLOGY_SERVICE_URL",
         "http://cytology:8011/analyze/cytology",
@@ -126,6 +130,9 @@ ALIASES = {
     "skin_lesion": "dermatology",
     "vista_ct": "ct_brain_vista",
     "ct_brain_premium": "ct_brain_vista",
+    "full_ct": "premium_ct_unified",
+    "vista_ct_full": "premium_ct_unified",
+    "premium_3d_ct": "premium_ct_unified",
 }
 
 

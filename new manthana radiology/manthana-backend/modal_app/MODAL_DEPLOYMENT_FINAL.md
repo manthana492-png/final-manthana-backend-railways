@@ -59,6 +59,15 @@ If you only cloned/pushed `manthana-backend` without `packages/` and `config/`, 
 
 Create a secret in the Modal dashboard named **`manthana-env`** (override with env **`MANTHANA_MODAL_SECRET`** only if you rename it in code).
 
+**Full production template (recommended):** copy [`modal_app/manthana-modal-secret.env.example`](./manthana-modal-secret.env.example) to `modal_app/manthana-modal-secret.env`, fill secrets and weight paths, then:
+
+```bash
+cd "new manthana radiology/manthana-backend"
+python -m modal secret create manthana-env --force --from-dotenv "modal_app/manthana-modal-secret.env"
+```
+
+(Windows CMD: use `copy` to clone the `.example` file, then the same `python -m modal secret create ...` with your full path in quotes.)
+
 **Minimum recommended keys:**
 
 | Key | Notes |

@@ -19,7 +19,8 @@ app = modal.App("manthana-brain-mri")
     gpu="L4",
     volumes={"/models": models_volume()},
     secrets=[manthana_secret()],
-    **gpu_function_kwargs(timeout=900, scaledown_window=90, max_containers=3),
+    # max_containers=1 avoids several parallel cold starts from health probes / retries.
+    **gpu_function_kwargs(timeout=900, scaledown_window=90, max_containers=1),
 )
 @modal.asgi_app()
 def serve():

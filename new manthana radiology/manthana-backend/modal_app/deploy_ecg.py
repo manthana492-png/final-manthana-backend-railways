@@ -1,4 +1,4 @@
-"""Deploy ECG service to Modal: CPU-only FastAPI ASGI with scale-to-zero.
+r"""Deploy ECG service to Modal: CPU-only FastAPI ASGI with scale-to-zero.
 
 **No Modal volume** — ECG uses heuristics + neurokit2 + OpenRouter ``narrative_ecg`` only; no weight uploads.
 
