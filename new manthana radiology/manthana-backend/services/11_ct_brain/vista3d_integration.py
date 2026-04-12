@@ -24,7 +24,18 @@ def _vista_enabled() -> bool:
 
 
 def _model_path() -> str:
-    return (os.getenv("VISTA3D_MODEL_PATH") or "/models/vista3d/model.pt").strip()
+    """Prefer env; else first on-disk file (MONAI/VISTA3D-HF bootstrap layout or legacy ``model.pt``)."""
+    env = (os.getenv("VISTA3D_MODEL_PATH") or "").strip()
+    candidates = [
+        env,
+        "/models/vista3d/vista3d_pretrained_model/model.safetensors",
+        "/models/vista3d/model.pt",
+        "/models/vista3d/model.safetensors",
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return env or "/models/vista3d/model.pt"
 
 
 def enrich_vista3d_metadata(

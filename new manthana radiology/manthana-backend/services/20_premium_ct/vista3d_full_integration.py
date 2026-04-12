@@ -39,21 +39,35 @@ LABEL_DICT: dict[int, str] = {
 }
 
 
+def _load_state_dict(model_path: Path) -> dict[str, torch.Tensor]:
+    suf = model_path.suffix.lower()
+    if suf == ".safetensors" or model_path.name.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        # Load on CPU first; ``model.to(device)`` places weights on GPU.
+        raw = load_file(str(model_path))
+        if not isinstance(raw, dict):
+            raise RuntimeError("safetensors file did not yield a state dict.")
+        return raw  # type: ignore[return-value]
+
+    checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
+    if isinstance(checkpoint, dict):
+        inner = (
+            checkpoint.get("state_dict")
+            or checkpoint.get("model")
+            or checkpoint.get("network")
+        )
+        if isinstance(inner, dict):
+            return inner  # type: ignore[return-value]
+        return checkpoint  # type: ignore[return-value]
+    raise RuntimeError("Unsupported VISTA checkpoint format: expected dict or safetensors.")
+
+
 def _load_vista_model(model_path: Path, device: str) -> torch.nn.Module:
     from monai.networks.nets import Vista3D
 
     model = Vista3D(in_channels=1, out_channels=128)
-    checkpoint = torch.load(str(model_path), map_location=device)
-    state_dict = checkpoint
-    if isinstance(checkpoint, dict):
-        state_dict = (
-            checkpoint.get("state_dict")
-            or checkpoint.get("model")
-            or checkpoint.get("network")
-            or checkpoint
-        )
-    if not isinstance(state_dict, dict):
-        raise RuntimeError("Unsupported VISTA checkpoint format: expected state dict.")
+    state_dict = _load_state_dict(model_path)
     model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     model.eval()

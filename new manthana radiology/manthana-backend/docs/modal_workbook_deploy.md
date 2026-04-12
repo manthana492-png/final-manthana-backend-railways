@@ -105,6 +105,8 @@ python -m modal run modal_app\bootstrap_weights.py
 
 Optional (separate runs): `set MANTHANA_BOOTSTRAP=monai` then `python -m modal run modal_app\bootstrap_weights.py`; then `set MANTHANA_BOOTSTRAP=vista` and the same `modal run` (see [`../modal_app/bootstrap_weights.py`](../modal_app/bootstrap_weights.py)). Proprietary `.pt` files: `python -m modal volume put manthana-model-weights <local_file> <remote_path>` per [`../modal_app/MODAL_DEPLOYMENT_FINAL.md`](../modal_app/MODAL_DEPLOYMENT_FINAL.md) §4.
 
+**VISTA-3D weights (HF):** Bootstrap downloads **`MONAI/VISTA3D-HF`** → `/models/vista3d/vista3d_pretrained_model/model.safetensors` (~872 MB). The old repo id `nvidia/vista3d` is not valid on Hugging Face (401 / not found). Set `VISTA3D_MODEL_PATH` in `manthana-env` to that path (or leave unset; premium CT + `vista3d_integration` resolve defaults). Use `MANTHANA_BOOTSTRAP=vista-full` for the same download.
+
 **5) Smoke:** `curl -sS "https://<workspace2-slug>--manthana-<app>-serve.modal.run/health"` for each new app.
 
 **Note:** Modal’s docs use **`modal profile activate`** to switch workspaces from the CLI, not `modal workspace activate`.

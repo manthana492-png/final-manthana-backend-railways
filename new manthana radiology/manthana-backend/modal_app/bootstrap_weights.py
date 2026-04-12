@@ -6,7 +6,7 @@ Run from manthana-backend (with Modal CLI authenticated):
 
 Optional (env ``MANTHANA_BOOTSTRAP``):
   MANTHANA_BOOTSTRAP=monai  — MONAI Model Zoo bundles under /models/monai_bundles
-  MANTHANA_BOOTSTRAP=vista — VISTA-3D / foundation checkpoints under /models/vista3d
+  MANTHANA_BOOTSTRAP=vista — VISTA-3D weights under /models/vista3d (downloads from **MONAI/VISTA3D-HF**; legacy ``nvidia/vista3d`` URLs are invalid)
 
 Default (unset or ``totalseg``): TotalSegmentator open tasks only (**``total``**, **``total_mr``**).
 Tasks like **``vertebrae_body``** / **``heartchambers``** need a TotalSegmentator academic or commercial
@@ -141,46 +141,74 @@ def bootstrap_monai_bundles() -> dict:
 @app.function(
     image=_monai_torch_image,
     volumes={"/models": models_volume()},
+    secrets=[modal.Secret.from_name(MODAL_SECRET_NAME)],
     timeout=3600,
     cpu=4.0,
     memory=8192,
 )
 def bootstrap_vista3d_weights() -> dict:
-    """Download VISTA-style checkpoint if available on Hugging Face (repo layout may change)."""
+    """Download VISTA-3D pretrained weights from Hugging Face (public MONAI hub layout)."""
     os.makedirs("/models/vista3d", exist_ok=True)
     from huggingface_hub import hf_hub_download, snapshot_download
 
-    candidates = [
+    # Official public weights (NVIDIA ``nvidia/vista3d`` is not a valid HF repo — use MONAI hub).
+    primary = (
+        "MONAI/VISTA3D-HF",
+        "vista3d_pretrained_model/model.safetensors",
+    )
+    legacy_pt = [
         ("nvidia/vista3d", "model.pt"),
         ("nvidia/VISTA3D", "model.pt"),
     ]
     errors: list[str] = []
-    for repo_id, filename in candidates:
+
+    repo_id, filename = primary
+    try:
+        path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            local_dir="/models/vista3d",
+        )
+        return {
+            "volume": MODELS_VOLUME_NAME,
+            "vista3d_path": path,
+            "repo_id": repo_id,
+            "VISTA3D_MODEL_PATH": path,
+            "hint": (
+                "Set VISTA3D_MODEL_PATH in Modal secret (manthana-env) to this path if your "
+                "deploy image defaults differ."
+            ),
+        }
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"{repo_id}/{filename}: {str(e)[:400]}")
+
+    for lid, fn in legacy_pt:
         try:
             path = hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
+                repo_id=lid,
+                filename=fn,
                 local_dir="/models/vista3d",
             )
             return {
                 "volume": MODELS_VOLUME_NAME,
                 "vista3d_path": path,
-                "repo_id": repo_id,
-                "hint": "Set VISTA3D_MODEL_PATH in manthana-env if path differs.",
+                "repo_id": lid,
+                "VISTA3D_MODEL_PATH": path,
+                "hf_errors": errors,
             }
         except Exception as e:  # noqa: BLE001
-            errors.append(f"{repo_id}/{filename}: {str(e)[:400]}")
+            errors.append(f"{lid}/{fn}: {str(e)[:400]}")
 
     try:
         snap = snapshot_download(
-            repo_id="nvidia/vista3d",
+            repo_id=primary[0],
             local_dir="/models/vista3d",
-            ignore_patterns=["*.md", "*.txt"],
+            allow_patterns=["vista3d_pretrained_model/**", "*.safetensors", "*.json"],
         )
         return {
             "volume": MODELS_VOLUME_NAME,
             "vista3d_snapshot_dir": snap,
-            "note": "Inspect directory for .pt / .pth checkpoints; set VISTA3D_MODEL_PATH accordingly.",
+            "note": "Inspect vista3d_pretrained_model/ for model.safetensors; set VISTA3D_MODEL_PATH.",
             "hf_errors": errors,
         }
     except Exception as e2:  # noqa: BLE001
@@ -188,7 +216,10 @@ def bootstrap_vista3d_weights() -> dict:
             "volume": MODELS_VOLUME_NAME,
             "error": str(e2)[:500],
             "hf_errors": errors,
-            "hint": "Upload weights manually: modal volume put ... /models/vista3d/",
+            "hint": (
+                "Public weights: MONAI/VISTA3D-HF → vista3d_pretrained_model/model.safetensors. "
+                "Or upload a .pt/.safetensors with: modal volume put … /models/vista3d/"
+            ),
         }
 
 

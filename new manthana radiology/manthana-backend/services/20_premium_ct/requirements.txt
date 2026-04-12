@@ -9,6 +9,7 @@ pydicom>=2.4
 opencv-python-headless>=4.8
 nibabel>=5.0
 monai==1.4.0
+safetensors>=0.4.0
 huggingface_hub>=0.20.0
 transformers>=4.35.0
 

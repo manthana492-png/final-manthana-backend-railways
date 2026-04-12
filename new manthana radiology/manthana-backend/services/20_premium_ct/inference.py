@@ -28,12 +28,14 @@ PIPELINE_VERSION = "manthana-premium-ct-v1"
 
 
 def is_loaded() -> dict[str, Any]:
-    checkpoints_present = os.path.isfile(premium_config.VISTA3D_MODEL_PATH)
+    resolved = premium_config.resolve_vista3d_checkpoint_path()
+    checkpoints_present = os.path.isfile(resolved)
     return {
         "vista3d_enabled": premium_config.VISTA3D_ENABLED,
         "vista3d_full_forward": premium_config.VISTA3D_FULL_FORWARD,
         "vista3d_checkpoint_present": checkpoints_present,
-        "vista3d_checkpoint_path": premium_config.VISTA3D_MODEL_PATH,
+        "vista3d_checkpoint_path": resolved,
+        "vista3d_model_path_env": premium_config.VISTA3D_MODEL_PATH,
     }
 
 
@@ -107,7 +109,7 @@ def run_pipeline(
     vista_results = run_vista3d_segmentation(
         volume=np.asarray(volume),
         spacing_xyz=spacing_xyz,
-        model_path=premium_config.VISTA3D_MODEL_PATH,
+        model_path=premium_config.resolve_vista3d_checkpoint_path(),
         device=premium_config.DEVICE,
         region_hint=region_hint,
     )

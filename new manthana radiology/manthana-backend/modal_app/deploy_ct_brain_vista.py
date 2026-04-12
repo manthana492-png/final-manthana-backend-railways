@@ -28,7 +28,10 @@ def serve():
 
     os.environ.setdefault("MANTHANA_LLM_REPO_ROOT", "/app")
     os.environ.setdefault("VISTA3D_ENABLED", "true")
-    os.environ.setdefault("VISTA3D_MODEL_PATH", "/models/vista3d/model.pt")
+    os.environ.setdefault(
+        "VISTA3D_MODEL_PATH",
+        "/models/vista3d/vista3d_pretrained_model/model.safetensors",
+    )
     sys.path.insert(0, "/app")
     sys.path.insert(0, "/app/shared")
     from main import app as fastapi_app

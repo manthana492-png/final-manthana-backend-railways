@@ -204,10 +204,12 @@ def _structures_to_list(structures: Union[list, dict]) -> list:
         return [structures]
     return list(structures or [])
 
+APP_VERSION = "1.0.1-jwks-auth"
+
 app = FastAPI(
     title="Manthana Radiology Suite — Gateway",
     description="India's Complete AI Radiology Second-Opinion Suite",
-    version="1.0.0",
+    version=APP_VERSION,
 )
 
 app.include_router(admin_router)
@@ -323,7 +325,7 @@ async def health():
     return {
         "service": "gateway",
         "status": "ok",
-        "version": "1.0.0",
+        "version": APP_VERSION,
     }
 
 
