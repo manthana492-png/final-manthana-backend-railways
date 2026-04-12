@@ -20,8 +20,10 @@ Single place for **Manthana Oracle + Labs** production wiring. Paths are relativ
 | Variable | Notes |
 |----------|--------|
 | `JWT_SECRET` | Random string, **≥32 chars** (gateway startup fails otherwise). Still used as legacy JWT fallback. |
-| `SUPABASE_JWT_SECRET` | From Supabase → Project Settings → API → JWT Secret. Verifies browser `Authorization: Bearer <access_token>`. |
-| `SUPABASE_JWT_ISS` | Optional; e.g. `https://<project-ref>.supabase.co/auth/v1` if you enforce issuer. |
+| `SUPABASE_JWT_SECRET` | From Supabase → Project Settings → API → JWT Secret. Verifies **HS256** browser `Authorization: Bearer <access_token>` when the project uses the legacy shared secret for signing. |
+| `SUPABASE_JWT_ISS` | Optional; e.g. `https://<project-ref>.supabase.co/auth/v1` if you enforce issuer (recommended with JWKS verification). |
+| `SUPABASE_URL` | Optional; `https://<project-ref>.supabase.co`. When set, the gateway loads **JWKS** and verifies **RS256/ES256** (etc.) access tokens per [Supabase JWT Signing Keys](https://supabase.com/docs/guides/auth/signing-keys). Use with or without `SUPABASE_JWT_SECRET` depending on whether tokens are asymmetric or HS256. |
+| `SUPABASE_JWKS_URL` | Optional override; default is `{SUPABASE_JWT_ISS or SUPABASE_URL}/auth/v1/.well-known/jwks.json` (issuer path) or derived from `SUPABASE_URL`. |
 | `GATEWAY_CORS_ORIGINS` | Comma-separated origins, e.g. `https://manthana.quaasx108.com`. Empty = `*` (avoid in prod with credentials). |
 | `XRAY_TRIAGE_POLICY` | **`always_deep`** for slim Railway image (no torchxrayvision on gateway). |
 
@@ -85,7 +87,8 @@ Set each used modality to the Modal deployment URL (from `modal deploy`):
 
 | Variable | Notes |
 |----------|--------|
-| `OPENROUTER_API_KEY` | Required for chat/M5 (or `ORACLE_OPENROUTER_API_KEY`). |
+| `OPENROUTER_API_KEY` | Required for chat/M5 (or `ORACLE_OPENROUTER_API_KEY`). **Still required** when using free inference: OpenRouter authenticates every request; set `model` to `openrouter/free` via env below (see [Free Models Router](https://openrouter.ai/docs/guides/routing/routers/free-models-router)). |
+| `ORACLE_USE_FREE_MODELS` | Set `true` to use roles `oracle_chat_free` / `oracle_m5_free` → primary model **`openrouter/free`** (auto-picks a capable free model) with YAML fallbacks. Default `false` uses paid-tier primaries (`moonshotai/kimi-k2.5:online`, etc.). |
 | `CLOUD_INFERENCE_CONFIG_PATH` | Baked in image as `/app/config/cloud_inference.yaml` when using oracle Dockerfile. |
 | `FRONTEND_URL` / CORS-related | Set production app origin for CORS if clients hit Oracle directly; behind gateway proxy often minimal. |
 | `ORACLE_REDIS_URL` | **Empty for launch** if you want Railway **serverless** sleep (no persistent Redis chatter). |
