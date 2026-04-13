@@ -589,14 +589,9 @@ async def list_services():
     
     services = []
     for modality, url in SERVICE_MAP.items():
-        # Quick health check
-        try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                health_url = url.rsplit("/analyze", 1)[0] + "/health"
-                resp = await client.get(health_url)
-                status = "online" if resp.status_code == 200 else "offline"
-        except Exception:
-            status = "offline"
+        # Serverless Modalities are always "online" if configured.
+        # Making live HTTP requests defeats scale-to-zero and costs money.
+        status = "online" if url and url.startswith("http") else "offline"
         
         services.append({
             "modality": modality,
