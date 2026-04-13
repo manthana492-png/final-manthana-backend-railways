@@ -1106,6 +1106,21 @@ async def oracle_proxy(
     )
 
 
+def _sanitize_for_embedding(obj):
+    """Convert unhashable types (numpy arrays, slices) to serializable Python types."""
+    if hasattr(obj, 'tolist'):  # numpy array
+        return obj.tolist()
+    if hasattr(obj, 'item'):  # numpy scalar
+        return obj.item()
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_embedding(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_embedding(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_embedding(item) for item in obj)
+    return obj
+
+
 def _trigger_case_embedding(job_id: str, patient_id: str, modality: str, result: dict):
     """
     Fire-and-forget case embedding generation.
@@ -1119,13 +1134,16 @@ def _trigger_case_embedding(job_id: str, patient_id: str, modality: str, result:
             sys.path.insert(0, "/app/shared")
             from case_embeddings import build_case_summary, store_case_embedding
             
+            # Sanitize result to remove unhashable numpy arrays/slices
+            safe_result = _sanitize_for_embedding(result)
+            
             case_summary = build_case_summary(
                 modality=modality,
-                findings=result.get("findings", []),
-                impression=result.get("impression", ""),
-                pathology_scores=result.get("pathology_scores", {}),
-                structures=result.get("structures", []),
-                lab_values=result.get("labs"),
+                findings=safe_result.get("findings", []),
+                impression=safe_result.get("impression", ""),
+                pathology_scores=safe_result.get("pathology_scores", {}),
+                structures=safe_result.get("structures", []),
+                lab_values=safe_result.get("labs"),
             )
             
             store_case_embedding(
@@ -1134,16 +1152,16 @@ def _trigger_case_embedding(job_id: str, patient_id: str, modality: str, result:
                 patient_id=patient_id,
                 modality=modality,
                 metadata={
-                    "pathology_scores": result.get("pathology_scores"),
-                    "structures": result.get("structures"),
-                    "models_used": result.get("models_used", []),
+                    "pathology_scores": safe_result.get("pathology_scores"),
+                    "structures": safe_result.get("structures"),
+                    "models_used": safe_result.get("models_used", []),
                 },
             )
             
             logging.getLogger("manthana.gateway").info(f"Embedding created for case: {job_id}")
             
         except Exception as e:
-            logging.getLogger("manthana.gateway").error(f"Background embedding failed: {e}")
+            logging.getLogger("manthana.gateway").error(f"Background embedding failed: {e}", exc_info=True)
     
     # Run in background thread
     thread = threading.Thread(target=_embed, daemon=True)
