@@ -28,7 +28,9 @@ RUN pip install --no-cache-dir -U pip setuptools wheel \
     && pip install --no-cache-dir "instructor>=1.0.0"
 
 COPY ["new manthana radiology/manthana-backend/services/report_assembly/requirements.txt", "/tmp/ra-requirements.txt"]
-RUN pip install --no-cache-dir -r /tmp/ra-requirements.txt
+# Install torch CPU-only first (smaller size), then install other requirements
+RUN pip install --no-cache-dir torch==2.6.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r /tmp/ra-requirements.txt
 
 COPY ["new manthana radiology/manthana-backend/shared", "/app/shared"]
 COPY ["new manthana radiology/manthana-backend/services/report_assembly", "/app"]
