@@ -4,6 +4,5 @@ httpx==0.28.*
 pydantic==2.*
 weasyprint==63.*
 openai>=1.40.0          # For DeepSeek, Kimi, Groq APIs
---index-url https://download.pytorch.org/whl/cpu
-torch==2.6.0+cpu        # CPU-only for smaller image size
+torch==2.6.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu  # CPU-only for smaller image size
 transformers>=4.30.0    # For case embeddings (Parrotlet-E tokenizer)
