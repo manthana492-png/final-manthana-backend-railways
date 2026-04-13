@@ -435,6 +435,8 @@ def run_pipeline(
         if comp2comp_results.get("visceral_fat_cm2") is not None:
             scores["visceral_fat_cm2"] = comp2comp_results.get("visceral_fat_cm2")
 
+        ctx_pc = patient_context or {}
+
         # Chest CT routing: Sybil lung cancer risk + chest heuristics
         ct_region = str(ctx_pc.get("ct_region") or "").lower()
         is_chest_ct = ct_region in ("chest", "thorax", "lung")
@@ -508,7 +510,6 @@ def run_pipeline(
             dicom_n=dicom_n,
         )
 
-        ctx_pc = patient_context or {}
         contrast_phase = str(ctx_pc.get("contrast_phase") or "unknown")
 
         organ_structures_measured = 0
