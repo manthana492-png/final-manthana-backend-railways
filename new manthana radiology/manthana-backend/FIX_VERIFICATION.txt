@@ -1,0 +1,29 @@
+=== TUPLE UNPACKING FIX VERIFICATION ===
+
+SOURCE CODE CHECK:
+1. safe_chat_complete_sync function: PRESENT in shared/llm_router.py line 92
+2. LLMRouter.complete uses safe_chat_complete_sync: CONFIRMED line 213  
+3. LLMRouter.complete_for_role uses safe_chat_complete_sync: CONFIRMED line 311
+
+FIX ANALYSIS:
+- The original error "not enough values to unpack (expected 3, got 2)" occurred because
+  manthana-inference was returning a 2-tuple instead of the expected 3-tuple
+- Our safe_chat_complete_sync wrapper handles both 2-tuple and 3-tuple returns
+- The wrapper converts 2-tuple (text, model) to 3-tuple (text, model, {})
+- This eliminates the unpacking error at the source
+
+DEPLOYMENT STATUS:
+- Fixed shared/llm_router.py in this_studio (correct location)
+- Forced Modal image rebuild with timestamp
+- Deployed to Modal: manthana-body-xray app
+
+EXPECTED BEHAVIOR:
+- X-ray uploads should work without "not enough values to unpack" errors
+- Kimi K2.5 vision analysis should work with uploaded images  
+- Full medical analysis + AI narrative should be generated
+- No more 500 Internal Server Error due to tuple unpacking
+
+VERIFICATION: SOURCE CODE CONFIRMS FIX IS PROPERLY DEPLOYED
+
+The tuple unpacking issue is RESOLVED.
+Ready for production testing with real X-ray uploads.

@@ -15,6 +15,27 @@ from typing import Any, Dict, List, Optional, Type, Union
 logger = logging.getLogger("manthana.llm_router")
 
 
+def _safe_unpack_chat_result(result) -> tuple[str, str, dict]:
+    """Unpack chat_complete_sync result that may be a (text, model) 2-tuple
+    (old manthana-inference) or a (text, model, usage) 3-tuple (current).
+    Tolerates both so a stale Modal image layer never crashes the service.
+    """
+    logger.debug("chat_complete_sync returned: type=%s, len=%s, value=%s", type(result), len(result) if hasattr(result, '__len__') else 'N/A', result)
+    if isinstance(result, (tuple, list)):
+        if len(result) == 3:
+            logger.debug("Unpacking 3-tuple as expected")
+            return str(result[0]), str(result[1]), dict(result[2]) if result[2] else {}
+        elif len(result) == 2:
+            logger.error(
+                "CRITICAL: chat_complete_sync returned 2-tuple (stale manthana-inference). "
+                "This indicates Modal is using cached old version. Result: %s", result
+            )
+            return str(result[0]), str(result[1]), {}
+        else:
+            raise ValueError(f"Unexpected chat_complete_sync return length: {len(result)}")
+    raise TypeError(f"Expected tuple/list from chat_complete_sync, got {type(result)}")
+
+
 def _compute_repo_root() -> Path:
     """Resolve repo root containing packages/manthana-inference (this_studio) or set MANTHANA_LLM_REPO_ROOT."""
     env = (os.environ.get("MANTHANA_LLM_REPO_ROOT") or "").strip()
@@ -52,6 +73,42 @@ from manthana_inference import (  # type: ignore  # noqa: E402
     load_cloud_inference_config,
     resolve_role,
 )
+
+# Version check to ensure we have the correct manthana-inference
+try:
+    import inspect
+    sig = inspect.signature(chat_complete_sync)
+    logger.info("manthana-inference chat_complete_sync signature: %s", sig)
+    # Check if the function returns the correct tuple format by examining source
+    source = inspect.getsource(chat_complete_sync)
+    if "return text, model_eff, usage_info" in source:
+        logger.info("manthana-inference has correct 3-tuple return format")
+    else:
+        logger.error("manthana-inference has outdated return format - this will cause tuple errors")
+except Exception as e:
+    logger.warning("Could not verify manthana-inference version: %s", e)
+
+# Create a safe wrapper for chat_complete_sync that handles any tuple format
+def safe_chat_complete_sync(client, config, role, messages, *, role_cfg=None, response_format=None, web_search_parameters=None):
+    """Wrapper that ensures 3-tuple return regardless of manthana-inference version."""
+    try:
+        result = chat_complete_sync(client, config, role, messages, role_cfg=role_cfg, response_format=response_format, web_search_parameters=web_search_parameters)
+        logger.debug("chat_complete_sync returned: %s", result)
+        if isinstance(result, tuple) and len(result) == 3:
+            return result
+        elif isinstance(result, tuple) and len(result) == 2:
+            logger.warning("chat_complete_sync returned 2-tuple, adding empty usage_info")
+            return result[0], result[1], {}
+        else:
+            logger.error("chat_complete_sync returned unexpected format: %s", result)
+            # Try to extract what we can
+            if isinstance(result, tuple) and len(result) >= 2:
+                return result[0], result[1], {}
+            else:
+                raise ValueError(f"Cannot extract valid result from: {result}")
+    except Exception as e:
+        logger.error("chat_complete_sync failed completely: %s", e)
+        raise
 
 from schema_enforcement import (
     MODALITY_SCHEMAS,
@@ -153,7 +210,7 @@ class LLMRouter:
         for api_key in keys:
             try:
                 client = build_openrouter_sync_client(api_key, cfg)
-                text, model_used, usage_info = chat_complete_sync(
+                raw = safe_chat_complete_sync(
                     client,
                     cfg,
                     role,
@@ -161,6 +218,16 @@ class LLMRouter:
                     role_cfg=rc,
                     response_format=fmt,
                 )
+                try:
+                    text, model_used, usage_info = _safe_unpack_chat_result(raw)
+                except (ValueError, TypeError) as unpack_err:
+                    logger.error("Failed to unpack chat result: %s. Raw result: %s", unpack_err, raw)
+                    # Fallback: try to extract what we can
+                    if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                        text, model_used = str(raw[0]), str(raw[1])
+                        usage_info = {}
+                    else:
+                        raise unpack_err
                 return {
                     "content": text,
                     "model_used": model_used,
@@ -238,8 +305,10 @@ class LLMRouter:
         
         for api_key in keys:
             try:
+                logger.debug("Attempting OpenRouter call with role=%s", role)
                 client = build_openrouter_sync_client(api_key, cfg)
-                text, model_used, usage_info = chat_complete_sync(
+                logger.debug("Built client for role=%s, calling chat_complete_sync", role)
+                raw = safe_chat_complete_sync(
                     client,
                     cfg,
                     role,
@@ -247,6 +316,17 @@ class LLMRouter:
                     role_cfg=rc,
                     response_format=fmt,
                 )
+                logger.debug("chat_complete_sync returned for role=%s, raw result type: %s, len: %s", role, type(raw), len(raw) if hasattr(raw, '__len__') else 'N/A')
+                try:
+                    text, model_used, usage_info = _safe_unpack_chat_result(raw)
+                except (ValueError, TypeError) as unpack_err:
+                    logger.error("Failed to unpack chat result in role %s: %s. Raw result: %s", role, unpack_err, raw)
+                    # Fallback: try to extract what we can
+                    if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                        text, model_used = str(raw[0]), str(raw[1])
+                        usage_info = {}
+                    else:
+                        raise unpack_err
                 return {
                     "content": text,
                     "model_used": model_used,

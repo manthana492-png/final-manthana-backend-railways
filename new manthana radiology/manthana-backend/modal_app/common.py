@@ -101,6 +101,9 @@ def with_manthana_llm_stack(img: modal.Image) -> modal.Image:
         .run_commands(
             "pip install -e /app/packages/manthana-inference",
             "pip install 'instructor>=1.0.0'",
+            "echo 'CRITICAL FIX v4.1.0 - $(date +%s)' > /tmp/rebuild_timestamp",
+            "export MANTHANA_FORCE_REBUILD=20240414_0256_v410",
+            "python -c 'import sys; print(f\"Python rebuild: {sys.version}\")'",
         )
     )
 
@@ -263,7 +266,8 @@ def service_image_premium_ct() -> modal.Image:
 
 
 def service_image_body_xray() -> modal.Image:
-    """TorchXRayVision + OpenCV body_xray; TXRV weights baked in image; no nnUNet/Comp2Comp."""
+    """TorchXRayVision + OpenCV body_xray; TXRV weights baked in image; no nnUNet/Comp2Comp.
+    CRITICAL FIX: Graceful narrative failure - NO MORE 500 ERRORS - v4.1.0 - $(date)"""
     br = backend_root()
     req = br / "services" / "01_body_xray" / "requirements.txt"
     img = cuda_runtime_python311()

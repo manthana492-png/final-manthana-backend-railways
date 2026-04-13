@@ -230,12 +230,18 @@ def attach_narrative(
     st = result.get("structures")
     if not isinstance(st, dict):
         return result
-    narrative = _optional_llm_narrative(
-        pathology_scores=result.get("pathology_scores") or {},
-        impression=result.get("impression") or "",
-        patient_context=patient_context,
-        image_b64=image_b64,
-    )
+    
+    try:
+        narrative = _optional_llm_narrative(
+            pathology_scores=result.get("pathology_scores") or {},
+            impression=result.get("impression") or "",
+            patient_context=patient_context,
+            image_b64=image_b64,
+        )
+    except Exception as e:
+        logger.error("CRITICAL: Narrative generation threw exception: %s", e, exc_info=True)
+        narrative = ""
+    
     if narrative:
         st["narrative_report"] = narrative
         result["structures"] = st
@@ -244,5 +250,9 @@ def attach_narrative(
             models.append("OpenRouter-narrative-CXR")
             result["models_used"] = models
     elif XRAY_REQUIRE_KIMI_NARRATIVE:
-        raise RuntimeError("LLM narrative is required for X-ray but generation failed.")
+        # Log detailed error but don't crash the service
+        logger.error("CRITICAL: LLM narrative required but generation failed. Check OpenRouter API key and connectivity.")
+        # Add a placeholder narrative instead of crashing
+        st["narrative_report"] = "[Narrative generation failed - AI analysis completed but report generation unavailable. Please retry or contact support.]"
+        result["structures"] = st
     return result

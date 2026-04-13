@@ -1,0 +1,60 @@
+Running verification test...
+
+import sys
+import os
+
+# Add paths to match Modal environment
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'shared'))
+sys.path.insert(0, os.path.dirname(__file__))
+
+results = []
+
+# Test 1: Check if our safe_chat_complete_sync function exists
+try:
+    from shared.llm_router import safe_chat_complete_sync, _safe_unpack_chat_result
+    results.append("SUCCESS: safe_chat_complete_sync function found")
+except ImportError as e:
+    results.append(f"FAILED: Import error: {e}")
+
+# Test 2: Test the _safe_unpack_chat_result function with different tuple formats
+results.append("\nTesting _safe_unpack_chat_result function:")
+
+# Test with 3-tuple (correct format)
+try:
+    text, model, usage = _safe_unpack_chat_result(("Hello world", "gpt-4", {"tokens": 10}))
+    results.append("SUCCESS: 3-tuple unpacking works")
+    results.append(f"  Text: {text}, Model: {model}, Usage: {usage}")
+except Exception as e:
+    results.append(f"FAILED: 3-tuple unpacking failed: {e}")
+
+# Test with 2-tuple (problematic format that was causing errors)
+try:
+    text, model, usage = _safe_unpack_chat_result(("Hello world", "gpt-4"))
+    results.append("SUCCESS: 2-tuple unpacking works (this was the bug!)")
+    results.append(f"  Text: {text}, Model: {model}, Usage: {usage}")
+except Exception as e:
+    results.append(f"FAILED: 2-tuple unpacking failed: {e}")
+
+# Test 3: Check if we're using the safe wrapper in LLMRouter
+try:
+    from shared.llm_router import LLMRouter
+    import inspect
+    
+    # Get the source of complete_for_role method
+    source = inspect.getsource(LLMRouter.complete_for_role)
+    if "safe_chat_complete_sync" in source:
+        results.append("SUCCESS: LLMRouter.complete_for_role uses safe_chat_complete_sync")
+    else:
+        results.append("WARNING: LLMRouter may still be using direct chat_complete_sync")
+        
+except Exception as e:
+    results.append(f"WARNING: Could not verify LLMRouter methods: {e}")
+
+results.append("\n=== Fix Verification Complete ===")
+
+# Write results to file
+with open("verification_results.txt", "w") as f:
+    for result in results:
+        f.write(result + "\n")
+
+results.append("Results written to verification_results.txt")

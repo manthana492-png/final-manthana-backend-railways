@@ -20,6 +20,13 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 sys.path.insert(0, "/app/shared")
 
+# CRITICAL: Verify tuple unpacking fix is loaded
+try:
+    from llm_router import safe_chat_complete_sync
+    print("CRITICAL: safe_chat_complete_sync loaded - tuple fix is ACTIVE")
+except ImportError:
+    print("WARNING: safe_chat_complete_sync not found - tuple fix may be missing")
+
 from image_intake import (
     intake_pil_to_temp_path,
     merge_image_quality_into_result,
