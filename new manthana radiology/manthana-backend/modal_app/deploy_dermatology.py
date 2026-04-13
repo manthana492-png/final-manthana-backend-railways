@@ -32,7 +32,7 @@ app = modal.App("manthana-dermatology")
     memory=6144,  # V2-M + optional Grad-CAM; reduce to 4096 if memory is tight and CAM is off
     volumes={"/models": models_volume()},  # Optional DermAI V2 weights
     secrets=[manthana_secret()],
-    **cpu_function_kwargs(timeout=300, scaledown_window=60, max_containers=3),
+    **cpu_function_kwargs(timeout=300, scaledown_window=60, max_containers=1),
 )
 @modal.asgi_app()
 def serve():

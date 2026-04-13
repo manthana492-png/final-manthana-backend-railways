@@ -19,7 +19,7 @@ app = modal.App("manthana-cytology")
     gpu="T4",
     volumes={"/models": models_volume()},
     secrets=[manthana_secret()],
-    **gpu_function_kwargs(timeout=600, scaledown_window=90, max_containers=4),
+    **gpu_function_kwargs(timeout=600, scaledown_window=90, max_containers=1),
 )
 @modal.asgi_app()
 def serve():

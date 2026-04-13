@@ -57,7 +57,7 @@ def gpu_function_kwargs(
     *,
     timeout: int = 600,
     scaledown_window: int = 90,
-    max_containers: int = 4,
+    max_containers: int = 1,
 ) -> dict[str, Any]:
     return {
         "timeout": timeout,
@@ -429,7 +429,7 @@ def cpu_function_kwargs(
     *,
     timeout: int = 300,
     scaledown_window: int = 60,
-    max_containers: int = 3,
+    max_containers: int = 1,
 ) -> dict[str, Any]:
     """Autoscaling settings for CPU-only containers (scale to zero, pay per use)."""
     return {

@@ -141,8 +141,8 @@ def chat_complete_sync(
     role_cfg: Optional[RoleConfig] = None,
     response_format: Optional[Dict[str, Any]] = None,
     web_search_parameters: Optional[Dict[str, Any]] = None,
-) -> tuple[str, str]:
-    """Return (content, model_used). Tries primary + fallbacks."""
+) -> tuple[str, str, Dict[str, Any]]:
+    """Return (content, model_used, usage_info). Tries primary + fallbacks."""
     from manthana_inference.loader import resolve_role
 
     rc = role_cfg or resolve_role(config, role)
@@ -163,7 +163,18 @@ def chat_complete_sync(
                 kwargs["tools"] = _openrouter_web_search_tools(web_search_parameters)
             comp = client.chat.completions.create(**kwargs)
             text = (comp.choices[0].message.content or "").strip()
-            return text, model_eff
+            usage = getattr(comp, "usage", None)
+            usage_info: Dict[str, Any] = {}
+            if usage is not None:
+                try:
+                    usage_info = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(usage, "completion_tokens", 0),
+                        "total_tokens": getattr(usage, "total_tokens", 0),
+                    }
+                except Exception:
+                    usage_info = {}
+            return text, model_eff, usage_info
         except Exception as e:
             last_err = e
             logger.debug("openrouter model %s failed: %s", model, e)
@@ -179,7 +190,8 @@ async def chat_complete_async(
     role_cfg: Optional[RoleConfig] = None,
     response_format: Optional[Dict[str, Any]] = None,
     web_search_parameters: Optional[Dict[str, Any]] = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, Dict[str, Any]]:
+    """Return (content, model_used, usage_info). Tries primary + fallbacks."""
     from manthana_inference.loader import resolve_role
 
     rc = role_cfg or resolve_role(config, role)
@@ -200,7 +212,18 @@ async def chat_complete_async(
                 kwargs["tools"] = _openrouter_web_search_tools(web_search_parameters)
             comp = await client.chat.completions.create(**kwargs)
             text = (comp.choices[0].message.content or "").strip()
-            return text, model_eff
+            usage = getattr(comp, "usage", None)
+            usage_info: Dict[str, Any] = {}
+            if usage is not None:
+                try:
+                    usage_info = {
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(usage, "completion_tokens", 0),
+                        "total_tokens": getattr(usage, "total_tokens", 0),
+                    }
+                except Exception:
+                    usage_info = {}
+            return text, model_eff, usage_info
         except Exception as e:
             last_err = e
             logger.debug("openrouter model %s failed: %s", model, e)

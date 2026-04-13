@@ -29,7 +29,7 @@ app = modal.App("manthana-ecg")
     cpu=2.0,  # 2 physical cores - plenty for ECG signal processing
     memory=4096,  # 4GB RAM for model loading
     secrets=[manthana_secret()],
-    **cpu_function_kwargs(timeout=300, scaledown_window=60, max_containers=3),
+    **cpu_function_kwargs(timeout=300, scaledown_window=60, max_containers=1),
 )
 @modal.asgi_app()
 def serve():

@@ -500,7 +500,7 @@ async def analyze(
     try:
         response: Optional[httpx.Response] = None
         async with httpx.AsyncClient(timeout=600.0) as client:
-            for attempt in range(3):
+            for attempt in range(1):  # No retries
                 with open(forward_path, "rb") as f:
                     fwd: dict = {
                         "job_id": job_id,
@@ -523,9 +523,7 @@ async def analyze(
                         data=fwd,
                         headers={"X-Request-ID": rid},
                     )
-                if response.status_code not in (502, 503) or attempt >= 2:
-                    break
-                await asyncio.sleep(2.0 * (attempt + 1))
+                break  # No retries
 
         if response is not None and response.status_code == 200:
             result = response.json()

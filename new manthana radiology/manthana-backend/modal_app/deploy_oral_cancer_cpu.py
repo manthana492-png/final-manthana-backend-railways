@@ -32,7 +32,7 @@ app = modal.App("manthana-oral-cancer-cpu")
     memory=4096,  # 4GB RAM for image processing
     volumes={"/models": models_volume()},  # oral_effnet_v2m.pt, B3 checkpoint, optional UNI head
     secrets=[manthana_secret()],
-    **cpu_function_kwargs(timeout=300, scaledown_window=60, max_containers=3),
+    **cpu_function_kwargs(timeout=300, scaledown_window=60, max_containers=1),
 )
 @modal.asgi_app()
 def serve():

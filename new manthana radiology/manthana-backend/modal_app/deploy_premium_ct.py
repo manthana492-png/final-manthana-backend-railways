@@ -19,7 +19,7 @@ app = modal.App("manthana-premium-ct")
     gpu="A10G",
     volumes={"/models": models_volume()},
     secrets=[manthana_secret()],
-    **gpu_function_kwargs(timeout=900, scaledown_window=180, max_containers=2),
+    **gpu_function_kwargs(timeout=900, scaledown_window=180, max_containers=1),
 )
 @modal.asgi_app()
 def serve():
