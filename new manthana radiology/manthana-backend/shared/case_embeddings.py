@@ -196,7 +196,17 @@ def build_case_summary(
     
     # Structures
     if structures:
-        parts.append(f"Structures: {', '.join(structures[:10])}")
+        # Sanitize structures to handle numpy arrays/unhashable types
+        if isinstance(structures, dict):
+            # If structures is a dict, extract keys or values
+            structures = list(structures.keys()) if structures else []
+        elif hasattr(structures, 'tolist'):
+            # Convert numpy array to list
+            structures = structures.tolist()
+        # Ensure all items are strings
+        structure_strs = [str(s) for s in structures[:10] if s is not None]
+        if structure_strs:
+            parts.append(f"Structures: {', '.join(structure_strs)}")
     
     # Lab values (if available)
     if lab_values:
