@@ -338,6 +338,91 @@ class LLMRouter:
                 logger.warning("OpenRouter role=%s attempt failed: %s", role, e)
         raise RuntimeError(f"All OpenRouter keys failed for role {role!r}. Last error: {last_err}")
 
+    def complete_for_role_with_web_search(
+        self,
+        role: str,
+        system_prompt: str,
+        user_text: str,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        requires_json: bool = False,
+        image_b64: Optional[str] = None,
+        image_mime: str = "image/jpeg",
+        web_search_parameters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Vision/text completion with optional OpenRouter openrouter:web_search server tool.
+        web_search_parameters example:
+          {"max_results": 3, "max_total_results": 6, "allowed_domains": ["pubmed.ncbi.nlm.nih.gov"]}
+        """
+        keys = _openrouter_keys()
+        if not keys:
+            raise ValueError(
+                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
+            )
+        cfg = _load_cfg()
+        rc = resolve_role(cfg, role)
+        upd: Dict[str, Any] = {}
+        if temperature is not None:
+            upd["temperature"] = temperature
+        if max_tokens is not None:
+            upd["max_tokens"] = max_tokens
+        if upd:
+            rc = rc.model_copy(update=upd)
+
+        sys_c = (system_prompt or "")[:200000]
+        user_c = user_text[:200000]
+        if image_b64 and image_b64.strip():
+            url = f"data:{image_mime};base64,{image_b64.strip()}"
+            user_content: Union[str, List[Dict[str, Any]]] = [
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "text", "text": user_c},
+            ]
+        else:
+            user_content = user_c
+
+        messages: List[Dict[str, Any]] = []
+        if sys_c.strip():
+            messages.append({"role": "system", "content": sys_c})
+        messages.append({"role": "user", "content": user_content})
+
+        fmt: Optional[Dict[str, Any]] = {"type": "json_object"} if requires_json else None
+        last_err: Optional[Exception] = None
+        usage_info: Dict[str, Any] = {}
+
+        for api_key in keys:
+            try:
+                client = build_openrouter_sync_client(api_key, cfg)
+                raw = safe_chat_complete_sync(
+                    client,
+                    cfg,
+                    role,
+                    list(messages),
+                    role_cfg=rc,
+                    response_format=fmt,
+                    web_search_parameters=web_search_parameters,
+                )
+                try:
+                    text, model_used, usage_info = _safe_unpack_chat_result(raw)
+                except (ValueError, TypeError) as unpack_err:
+                    logger.error("Failed to unpack chat result in role %s: %s", role, unpack_err)
+                    if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                        text, model_used = str(raw[0]), str(raw[1])
+                        usage_info = {}
+                    else:
+                        raise unpack_err
+                return {
+                    "content": text,
+                    "model_used": model_used,
+                    "usage": usage_info or {},
+                    "finish_reason": "stop",
+                }
+            except Exception as e:
+                last_err = e
+                logger.warning("OpenRouter role=%s web_search attempt failed: %s", role, e)
+        raise RuntimeError(f"All OpenRouter keys failed for role {role!r}. Last error: {last_err}")
+
     def complete_with_schema(
         self,
         role: str,

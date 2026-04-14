@@ -13,3 +13,6 @@ redis==5.*
 rq==2.*
 numpy>=1.24
 Pillow>=10.0
+pydicom>=2.4
+pdfplumber>=0.11
+nibabel>=5.2

@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from admin import admin_router
 from consent import router as consent_router
 from auth_routes import router as auth_router
+from ai_orchestrator import router as ai_orchestrator_router
 from auth import verify_token, JWT_SECRET
 from router import ALIASES, route_to_service
 from ct_routing import enrich_ct_gateway_response
@@ -215,6 +216,7 @@ app = FastAPI(
 app.include_router(admin_router)
 app.include_router(consent_router)
 app.include_router(auth_router)
+app.include_router(ai_orchestrator_router)
 
 # CORS — set GATEWAY_CORS_ORIGINS in production (comma-separated)
 app.add_middleware(
