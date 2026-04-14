@@ -183,7 +183,7 @@ async def detect_modality(
 
     llm = _llm()
     modality_list = list_for_prompt()
-    system = detect_modality_system_prompt(modality_list_text=modality_list)
+    system = detect_sys(modality_list_text=modality_list)
     user_text = "Classify this study."
     if body.text_context and not body.image_b64:
         user_text = f"Document text (excerpt):\n{(body.text_context or '')[:12000]}"
