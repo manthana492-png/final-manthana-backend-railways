@@ -55,41 +55,25 @@ def test_oral_correlation_rules_exist(correlation_engine):
     assert any("Oral OPMD" in n for n in names)
 
 
-def test_gateway_build_findings_dict(monkeypatch):
-    sys.modules.pop("schemas", None)
-    sys.path.insert(0, _GATEWAY)
-    from schemas import SingleReportRequest
+def test_findings_dict_shape_for_assembly_style_payload():
+    """Legacy report_assembly payload shape (client-side / external tools may still build this)."""
+    findings = [{"label": "OPMD", "severity": "warning", "confidence": 72.0}]
+    impression = "Test"
+    pathology_scores = {"opmd": 0.6}
+    structures = {"clinical_notes": "tobacco_use:chewing"}
 
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "gateway_main", os.path.join(_GATEWAY, "main.py")
-    )
-    # Avoid loading full gateway (FastAPI deps); duplicate helper logic minimally:
-    def build(req: SingleReportRequest) -> dict:
-        if isinstance(req.findings, dict):
-            d = dict(req.findings)
-        else:
-            d = {"items": list(req.findings or [])}
-        if "pathology_scores" not in d:
-            d["pathology_scores"] = req.pathology_scores or {}
-        if "impression" not in d:
-            d["impression"] = req.impression
-        cn = req.clinical_notes
-        if cn is None and isinstance(req.structures, dict):
-            cn = req.structures.get("clinical_notes")
-        d["clinical_notes"] = (cn if cn is not None else "") or d.get("clinical_notes", "")
-        return d
-
-    req = SingleReportRequest(
-        modality="oral_cancer",
-        findings=[{"label": "OPMD", "severity": "warning", "confidence": 72.0}],
-        pathology_scores={"opmd": 0.6},
-        impression="Test",
-        structures={"clinical_notes": "tobacco_use:chewing"},
-        clinical_notes=None,
-    )
-    d = build(req)
+    if isinstance(findings, dict):
+        d = dict(findings)
+    else:
+        d = {"items": list(findings or [])}
+    if "pathology_scores" not in d:
+        d["pathology_scores"] = pathology_scores or {}
+    if "impression" not in d:
+        d["impression"] = impression
+    cn = None
+    if cn is None and isinstance(structures, dict):
+        cn = structures.get("clinical_notes")
+    d["clinical_notes"] = (cn if cn is not None else "") or d.get("clinical_notes", "")
     assert "items" in d
     assert d["clinical_notes"] == "tobacco_use:chewing"
 

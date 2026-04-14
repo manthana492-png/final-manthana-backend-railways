@@ -40,9 +40,6 @@ from ct_routing import enrich_ct_gateway_response
 from mri_routing import enrich_mri_gateway_response
 from schemas import (
     GatewayResponse,
-    SingleReportRequest,
-    UnifiedReportRequest,
-    UnifiedReportResponse,
     CopilotRequest,
     CopilotResponse,
 )
@@ -182,29 +179,6 @@ def _canonical_modality(modality: str) -> str:
 
 _PREMIUM_MODALITIES = frozenset({"ct_brain_vista", "premium_ct_unified"})
 
-
-def _build_findings_dict_for_assemble(req: SingleReportRequest) -> dict:
-    """Map SingleReportRequest → one dict for report_assembly `findings` field."""
-    if isinstance(req.findings, dict):
-        d = dict(req.findings)
-    else:
-        d = {"items": list(req.findings or [])}
-    if "pathology_scores" not in d:
-        d["pathology_scores"] = req.pathology_scores or {}
-    if "impression" not in d:
-        d["impression"] = req.impression
-    cn = req.clinical_notes
-    if cn is None and isinstance(req.structures, dict):
-        cn = req.structures.get("clinical_notes")
-    d["clinical_notes"] = (cn if cn is not None else "") or d.get("clinical_notes", "")
-    return d
-
-
-def _structures_to_list(structures: Union[list, dict]) -> list:
-    if isinstance(structures, dict):
-        return [structures]
-    return list(structures or [])
-
 APP_VERSION = "1.0.1-jwks-auth"
 
 app = FastAPI(
@@ -258,11 +232,6 @@ async def _validate_secrets():
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/manthana_uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# CPU narrative assembly (Docker default or Railway HTTPS). No trailing slash.
-REPORT_ASSEMBLY_URL = os.getenv(
-    "REPORT_ASSEMBLY_URL", "http://report_assembly:8020"
-).rstrip("/")
-
 # MedGemma CXR middle layer (Modal workspace 2 or dedicated container). No trailing slash.
 CXR_MEDGEMMA_SERVICE_URL = os.getenv(
     "CXR_MEDGEMMA_SERVICE_URL", "http://cxr_medgemma:8019"
@@ -315,11 +284,6 @@ async def _bundle_film_photos_as_zip(
 HEATMAP_DIR = os.path.join(UPLOAD_DIR, "heatmaps")
 os.makedirs(HEATMAP_DIR, exist_ok=True)
 app.mount("/heatmaps", StaticFiles(directory=HEATMAP_DIR), name="heatmaps")
-
-# ── PDF report static file serving ──
-PDF_OUTPUT_DIR = os.getenv("PDF_OUTPUT_DIR", "/tmp/manthana_reports")
-os.makedirs(PDF_OUTPUT_DIR, exist_ok=True)
-app.mount("/reports", StaticFiles(directory=PDF_OUTPUT_DIR), name="reports")
 
 
 @app.get("/health")
@@ -733,50 +697,6 @@ async def find_similar_cases(
         )
 
 
-@app.post("/report")
-async def single_report(
-    request: SingleReportRequest,
-    token_data: dict = Depends(verify_token),
-):
-    """Single-modality narrative report — proxies to report_assembly /assemble_report."""
-    start_time = time.time()
-    findings_dict = _build_findings_dict_for_assemble(request)
-    payload = {
-        "job_id": request.job_id or str(uuid.uuid4()),
-        "modality": request.modality,
-        "findings": findings_dict,
-        "structures": _structures_to_list(request.structures),
-        "patient_id": request.patient_id,
-        "detected_region": request.detected_region,
-        "language": request.language,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{REPORT_ASSEMBLY_URL}/assemble_report",
-                json=payload,
-            )
-        if response.status_code == 200:
-            result = response.json()
-            result["processing_time_sec"] = round(time.time() - start_time, 2)
-            result["models_used"] = _obfuscate_model_names(result.get("models_used"))
-            return result
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"Report service error: {response.text}",
-        )
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail="Report assembly service is not available. Check if it's running.",
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Report generation timed out. Please try again.",
-        )
-
-
 @app.post("/copilot", response_model=CopilotResponse)
 async def copilot(
     request: CopilotRequest,
@@ -834,50 +754,6 @@ End with: "Clinical correlation and radiologist verification required."
         response=content,
         model_used=_obfuscate_model_names([model_used])[0],
     )
-
-
-@app.post("/unified-report", response_model=UnifiedReportResponse)
-async def unified_report(
-    request: UnifiedReportRequest,
-    token_data: dict = Depends(verify_token),
-):
-    """
-    Multi-model unified analysis endpoint.
-    
-    Accepts individual analysis results from multiple modalities,
-    forwards them to the report_assembly service for cross-modality
-    unified report generation using DeepSeek.
-    """
-    start_time = time.time()
-
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{REPORT_ASSEMBLY_URL}/assemble_unified_report",
-                json=request.model_dump(),
-            )
-
-        if response.status_code == 200:
-            result = response.json()
-            result["processing_time_sec"] = round(time.time() - start_time, 2)
-            result["models_used"] = _obfuscate_model_names(result.get("models_used"))
-            return result
-        else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Unified report service error: {response.text}",
-            )
-
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail="Report assembly service is not available. Check if it's running.",
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Unified report generation timed out. Please try again.",
-        )
 
 
 @app.post("/cxr-medgemma/session/start")
