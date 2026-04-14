@@ -1,12 +1,14 @@
 # Slim gateway for Railway (no torch / transformers / chromadb).
+# Includes manthana-inference + cloud_inference.yaml so /ai/detect-modality and llm_router work.
 #
-# Build from manthana-backend root:
-#   docker build -f gateway/Dockerfile.railway -t manthana-gateway .
+# Build context MUST be `this_studio` (repo root that contains packages/ and config/):
+#   cd this_studio
+#   docker build -f "new manthana radiology/manthana-backend/gateway/Dockerfile.railway" -t manthana-gateway .
 
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
-COPY gateway/requirements-railway.txt ./requirements.txt
+COPY ["new manthana radiology/manthana-backend/gateway/requirements-railway.txt", "./requirements.txt"]
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM python:3.11-slim
@@ -14,8 +16,17 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY --from=builder /install /usr/local
 
-COPY gateway/ .
-COPY shared /app/shared
+COPY ["packages/manthana-inference", "/app/packages/manthana-inference"]
+COPY ["config/cloud_inference.yaml", "/app/config/cloud_inference.yaml"]
+
+RUN pip install --no-cache-dir -e /app/packages/manthana-inference
+
+COPY ["new manthana radiology/manthana-backend/gateway", "/app"]
+COPY ["new manthana radiology/manthana-backend/shared", "/app/shared"]
+
+ENV MANTHANA_LLM_REPO_ROOT=/app
+ENV CLOUD_INFERENCE_CONFIG_PATH=/app/config/cloud_inference.yaml
+ENV PYTHONPATH=/app:/app/shared
 
 EXPOSE 8000
 

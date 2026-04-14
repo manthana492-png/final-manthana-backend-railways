@@ -12,7 +12,13 @@ Single place for **Manthana Oracle + Labs** production wiring. Paths are relativ
 
 ## 1. Gateway (Railway, public)
 
-**Docker:** build from `manthana-backend/` with [`gateway/Dockerfile.railway`](gateway/Dockerfile.railway) (slim; no PyTorch).  
+**Docker:** build from **`this_studio/`** (repo root) with [`gateway/Dockerfile.railway`](gateway/Dockerfile.railway). The image bundles `packages/manthana-inference` and `config/cloud_inference.yaml` so `/ai/detect-modality` and related routes work (same pattern as report_assembly).
+
+```bash
+cd this_studio
+docker build -f "new manthana radiology/manthana-backend/gateway/Dockerfile.railway" -t manthana-gateway .
+```
+
 **Port:** `8000`
 
 ### Required
@@ -67,7 +73,9 @@ Set each used modality to the Modal deployment URL (from `modal deploy`):
 
 | Variable | Default / notes |
 |----------|-----------------|
-| `OPENROUTER_API_KEY` | Copilot / LLM paths on gateway if used. |
+| `OPENROUTER_API_KEY` | **Required** for 95-modality AI orchestration (`POST /ai/detect-modality`, `/ai/interrogate`, `/ai/interpret`) and CoPilot; uses `shared/llm_router.py` + OpenRouter. Also set optional `OPENROUTER_API_KEY_2` for failover. |
+| `CLOUD_INFERENCE_CONFIG_PATH` | Optional override; Dockerfile sets `/app/config/cloud_inference.yaml` (baked in). |
+| `MANTHANA_LLM_REPO_ROOT` | Optional override; Dockerfile sets `/app`. |
 | `USE_REDIS_QUEUE` | Omit or `0` for launch (sync `/analyze` only). |
 | `REDIS_URL` | Only if queue enabled. |
 | `PACS_BRIDGE_URL` | Default `http://pacs_bridge:8030`; skip PACS service at launch if unused. |
