@@ -19,6 +19,8 @@ cd this_studio
 docker build -f "new manthana radiology/manthana-backend/gateway/Dockerfile.railway" -t manthana-gateway .
 ```
 
+**Railway dashboard (required for this Dockerfile):** set **Root Directory** to the **monorepo root** (the folder that contains `packages/`, `config/`, and `new manthana radiology/`). Do **not** set Root Directory to `new manthana radiology/manthana-backend` — that limits the Docker build context and the image cannot see `packages/manthana-inference` or `config/cloud_inference.yaml`, so the build fails. Set **Dockerfile path** to `new manthana radiology/manthana-backend/gateway/Dockerfile.railway`.
+
 **Port:** `8000`
 
 ### Required

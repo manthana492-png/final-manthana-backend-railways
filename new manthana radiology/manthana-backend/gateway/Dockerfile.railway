@@ -1,9 +1,16 @@
 # Slim gateway for Railway (no torch / transformers / chromadb).
 # Includes manthana-inference + cloud_inference.yaml so /ai/detect-modality and llm_router work.
 #
-# Build context MUST be `this_studio` (repo root that contains packages/ and config/):
+# Build context MUST be the repo root that contains BOTH `packages/` AND `config/`
+# (e.g. `this_studio/`), NOT `manthana-backend/` alone — Railway "Root Directory" must
+# be empty or the monorepo root, otherwise COPY of packages/config fails.
+#
+# Local:
 #   cd this_studio
 #   docker build -f "new manthana radiology/manthana-backend/gateway/Dockerfile.railway" -t manthana-gateway .
+#
+# Railway: Root Directory = repo root · Dockerfile path =
+#   new manthana radiology/manthana-backend/gateway/Dockerfile.railway
 
 FROM python:3.11-slim AS builder
 
