@@ -52,6 +52,9 @@ def _load_pilot_users() -> List[Dict[str, Any]]:
 
 PILOT_USERS = _load_pilot_users()
 
+REVIEW_EMAIL = "manthanatest@gmail.com"
+REVIEW_PASSWORD = "Review@1234"
+
 
 @router.post("/auth/token", response_model=TokenResponse)
 async def issue_token(req: TokenRequest) -> TokenResponse:
@@ -59,6 +62,34 @@ async def issue_token(req: TokenRequest) -> TokenResponse:
     Minimal JWT issuance endpoint for pilot use.
     Validates against a static user store from PILOT_USERS_JSON.
     """
+    # RAZORPAY REVIEW ACCOUNT: hardcoded backend-only bypass for payment gateway review.
+    if req.username.strip().lower() == REVIEW_EMAIL and secrets.compare_digest(
+        req.password,
+        REVIEW_PASSWORD,
+    ):
+        hours = int(os.getenv("JWT_EXPIRY_HOURS", "12"))
+        now = datetime.utcnow()
+        exp = now + timedelta(hours=hours)
+        review_payload: Dict[str, Any] = {
+            "sub": "review-user-001",
+            "email": REVIEW_EMAIL,
+            "name": "Test User",
+            "role": "reviewer",
+            "plan": "free",
+            "is_review_account": True,
+            "iat": int(now.timestamp()),
+            "exp": int(exp.timestamp()),
+        }
+        review_token = jwt.encode(
+            review_payload,
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM,
+        )
+        return TokenResponse(
+            access_token=review_token,
+            expires_in=int((exp - now).total_seconds()),
+        )
+
     user = next((u for u in PILOT_USERS if u.get("username") == req.username), None)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
