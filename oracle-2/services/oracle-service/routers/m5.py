@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, List
 
 import httpx
@@ -69,6 +70,23 @@ class M5Request(BaseModel):
     message: str
     history: List[Dict[str, str]] = Field(default_factory=list)
     lang: str = Field(default="en")
+
+
+# Short pleasantries must not run RAG/web search — vague queries return unrelated clinical hits (e.g. diabetes).
+_GREETING_OR_THANKS = re.compile(
+    r"^\s*(hi|hello|hey|hii+|yo|sup|what'?s\s+up|"
+    r"good\s+(morning|afternoon|evening)|namaste|namaskar|hola|"
+    r"thanks?|thank\s+you|thx|ty|"
+    r"ok+|okay|bye|goodbye)\s*[!?.…]*\s*$",
+    re.I,
+)
+
+
+def _is_non_medical_greeting(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    return bool(_GREETING_OR_THANKS.match(t))
 
 
 # ── RAG Helpers (reuse chat logic) ────────────────────────────────────
@@ -182,12 +200,22 @@ async def _query_domain_llm_async(
     message: str,
     sources: List[Dict[str, Any]],
     rid: str,
+    *,
+    brief_conversational: bool = False,
 ) -> tuple[MedicalDomain, str, List[Dict[str, Any]]]:
     """Query LLM for a single domain via OpenRouter (role oracle_m5)."""
     keys = openrouter_api_keys(settings)
     domain_prompt = get_domain_system_prompt(domain)
     web_authority = _M5_DOMAIN_WEB_AUTHORITY.get(domain.value, _M5_DOMAIN_WEB_AUTHORITY["allopathy"])
-    m5_appendix = f"""
+    if brief_conversational:
+        m5_appendix = f"""
+You are answering in M5 (Five Domain) mode. The user's message is only a brief greeting or pleasantry — not a medical question.
+Reply in at most 3 short sentences from YOUR domain's perspective ({domain.value}). Be warm and welcoming.
+Do NOT discuss diseases, treatments, medications, or guidelines. Do NOT cite sources, URLs, or web search results.
+Invite the user to describe a health question when they are ready.
+"""
+    else:
+        m5_appendix = f"""
 You are answering in M5 (Five Domain) mode. The user will see your response alongside answers from 4 other medical systems. Provide a comprehensive answer from YOUR domain perspective only, emphasising what makes your system unique. Keep it informative but concise (300–500 words) for comparison purposes.
 
 WEB SEARCH CAPABILITY: You have real-time web search enabled restricted to authoritative sources for your domain. {web_authority}
@@ -206,6 +234,14 @@ WEB SEARCH CAPABILITY: You have real-time web search enabled restricted to autho
     if m5_model:
         role_cfg = role_cfg.model_copy(update={"model": m5_model})
     last_err: str = ""
+    web_params = (
+        None
+        if brief_conversational
+        else build_openrouter_web_search_parameters(
+            domain.value,
+            query=message,
+        )
+    )
     for api_key in keys:
         try:
             client = build_async_client(api_key, settings)
@@ -215,10 +251,7 @@ WEB SEARCH CAPABILITY: You have real-time web search enabled restricted to autho
                 role_name,
                 messages,
                 role_cfg=role_cfg,
-                web_search_parameters=build_openrouter_web_search_parameters(
-                    domain.value,
-                    query=message,
-                ),
+                web_search_parameters=web_params,
             )
             return domain, content or "", sources
         except Exception as exc:
@@ -290,10 +323,18 @@ def create_m5_router(limiter) -> APIRouter:
         ]
 
         use_rag = settings.ORACLE_USE_RAG
+        is_greeting = _is_non_medical_greeting(message)
+        if is_greeting:
+            json_log(
+                "manthana.oracle",
+                "info",
+                event="m5_greeting_short_circuit",
+                request_id=rid,
+            )
 
         async def query_single_domain(domain: MedicalDomain) -> tuple[MedicalDomain, str, List[Dict]]:
             sources: List[Dict[str, Any]] = []
-            if use_rag:
+            if use_rag and not is_greeting:
                 expanded = expand_query_for_domain(message, domain)
                 domain_query = expanded[-1] if len(expanded) > 1 else message
                 rag_result = await _rag_search(domain_query, settings, client, rid)
@@ -346,9 +387,16 @@ def create_m5_router(limiter) -> APIRouter:
                                 })
                         except Exception:
                             pass
-            else:
+            elif not use_rag:
                 json_log("manthana.oracle", "info", event="m5_rag_disabled", domain=domain.value, request_id=rid)
-            return await _query_domain_llm_async(settings, domain, message, sources, rid)
+            return await _query_domain_llm_async(
+                settings,
+                domain,
+                message,
+                sources,
+                rid,
+                brief_conversational=is_greeting,
+            )
 
         domain_results = await asyncio.gather(*[query_single_domain(d) for d in domains])
         domain_contents = {r[0]: r[1] for r in domain_results}
