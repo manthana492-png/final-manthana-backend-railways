@@ -321,9 +321,10 @@ roles:
     temperature: 0.15
     fallback_models: *fb_labs
   interpreter_free:
-    model: "openrouter/free"
-    max_tokens: 4096
+    model: "moonshotai/kimi-k2.5:online"
+    max_tokens: 5000
     temperature: 0.15
     fallback_models:
-      - "qwen/qwen2.5-vl-7b-instruct:free"
-      - "deepseek/deepseek-chat-v3-0324"
+      - "qwen/qwen2.5-vl-72b-instruct"
+      - "z-ai/glm-4.5v"
+      - "openai/gpt-4o-mini:online"
