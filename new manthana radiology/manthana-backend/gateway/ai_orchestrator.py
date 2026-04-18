@@ -289,7 +289,12 @@ def _registry():
 
 def _prompts():
     from prompts.interpreter_base import interpret_user_text_block, interpreter_system_prompt
-    from prompts.interrogator_base import detect_modality_system_prompt, interrogator_system_prompt
+    from prompts.interrogator_base import (
+        detect_modality_system_prompt,
+        detect_modality_user_prompt,
+        interrogator_system_prompt,
+        interrogator_user_prompt,
+    )
     from prompts.labs_pre_validate_prompt import LAB_PRE_VALIDATE_PROMPT
     from prompts.modality_prompts import group_specialization_for
 
@@ -297,10 +302,41 @@ def _prompts():
         interpret_user_text_block,
         interpreter_system_prompt,
         detect_modality_system_prompt,
+        detect_modality_user_prompt,
         interrogator_system_prompt,
+        interrogator_user_prompt,
         group_specialization_for,
         LAB_PRE_VALIDATE_PROMPT,
     )
+
+
+def _interrogator_context_from_patient_json(raw: Optional[str]) -> Dict[str, Any]:
+    """Optional age/sex/clinical_context for interrogator_system_prompt from patient_context_json."""
+    out: Dict[str, Any] = {}
+    if not raw or not str(raw).strip():
+        return out
+    s = str(raw).strip()
+    try:
+        obj = json.loads(s)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        out["clinical_context"] = s[:4000]
+        return out
+    if not isinstance(obj, dict):
+        out["clinical_context"] = s[:4000]
+        return out
+    age = obj.get("age") if "age" in obj else obj.get("patient_age")
+    if age is not None:
+        try:
+            out["patient_age"] = int(age)
+        except (TypeError, ValueError):
+            pass
+    sex = obj.get("sex") or obj.get("patient_sex")
+    if isinstance(sex, str) and sex.strip():
+        out["patient_sex"] = sex.strip()
+    ctx = obj.get("clinical_context") or obj.get("clinical_notes") or obj.get("notes")
+    if isinstance(ctx, str) and ctx.strip():
+        out["clinical_context"] = ctx.strip()[:4000]
+    return out
 
 
 def _session():
@@ -417,7 +453,7 @@ async def pre_validate(
     uid = _uid(token_data)
     tier = _tier(x_subscription_tier)
     _, _, _, _, _, _ = _registry()
-    (_, _, _, _, _, LAB_PRE_VALIDATE_PROMPT) = _prompts()
+    *_, LAB_PRE_VALIDATE_PROMPT = _prompts()
     llm = _llm()
     pc = json.dumps(body.patient_context or {}, ensure_ascii=False, indent=2)
     user_prompt = (
@@ -561,7 +597,9 @@ async def detect_modality(
         _iub,
         _interp_sys,
         detect_sys,
+        detect_usr,
         _iq_sys,
+        _iq_usr,
         _gs,
         _lab,
     ) = _prompts()
@@ -574,12 +612,15 @@ async def detect_modality(
     except HTTPException:
         raise
 
+    from prompts.interrogator_base import PROMPT_REGISTRY as _orch_prompt_registry
+
     llm = _llm()
     modality_list = list_for_prompt()
     system = detect_sys(modality_list_text=modality_list)
-    user_text = "Classify this study."
+    user_text = detect_usr()
     if body.text_context and not body.image_b64:
-        user_text = f"Document text (excerpt):\n{(body.text_context or '')[:12000]}"
+        user_text = f"{detect_usr()}\n\nDocument text (excerpt):\n{(body.text_context or '')[:12000]}"
+    _det_cfg = _orch_prompt_registry["detect_modality"]
 
     try:
         t0 = time.perf_counter()
@@ -588,6 +629,8 @@ async def detect_modality(
                 "modality_detect",
                 system,
                 user_text,
+                temperature=float(_det_cfg["temperature"]),
+                max_tokens=int(_det_cfg["max_tokens"]),
                 requires_json=True,
                 image_b64=body.image_b64,
                 image_mime=body.image_mime or "image/jpeg",
@@ -599,6 +642,8 @@ async def detect_modality(
                 "modality_detect",
                 system,
                 user_text,
+                temperature=float(_det_cfg["temperature"]),
+                max_tokens=int(_det_cfg["max_tokens"]),
                 requires_json=True,
                 use_web_on_first_openrouter=False,
                 fallback_single_role="modality_detect",
@@ -659,13 +704,17 @@ async def detect_modality(
         )
         raise HTTPException(status_code=502, detail=str(e)) from e
 
-    return {
+    out_detect: Dict[str, Any] = {
         "modality_key": data.get("modality_key", "unknown"),
         "confidence": float(data.get("confidence") or 0),
         "group": data.get("group"),
         "reason": data.get("reason"),
         "model_used": r.get("model_used"),
     }
+    for _k in ("scan_type", "laterality", "view", "image_quality", "urgency_flag"):
+        if data.get(_k) is not None and str(data.get(_k)).strip():
+            out_detect[_k] = data.get(_k)
+    return out_detect
 
 
 @router.post("/interrogate")
@@ -685,8 +734,10 @@ async def interrogate(
     (
         _iub,
         _interp_sys,
-        _det,
+        _det_sys,
+        _det_usr,
         interrogator_system_prompt,
+        interrogator_user_prompt,
         _group_spec,
         _lab,
     ) = _prompts()
@@ -727,8 +778,18 @@ async def interrogate(
     img_for_session_b64 = body.image_b64
     img_for_session_mime = body.image_mime or "image/jpeg"
 
-    sys_p = interrogator_system_prompt(modality_key=cfg.key, display_name=cfg.display_name)
-    user_t = "Generate questions JSON as specified."
+    from prompts.interrogator_base import PROMPT_REGISTRY as _orch_prompt_registry
+
+    _iq_ctx = _interrogator_context_from_patient_json(body.patient_context_json)
+    sys_p = interrogator_system_prompt(
+        modality_key=cfg.key,
+        display_name=cfg.display_name,
+        patient_age=_iq_ctx.get("patient_age"),
+        patient_sex=_iq_ctx.get("patient_sex"),
+        clinical_context=_iq_ctx.get("clinical_context"),
+    )
+    user_t = interrogator_user_prompt()
+    _iq_cfg = _orch_prompt_registry["interrogator"]
     lr = _llm()
     r: Dict[str, Any]
     interrogator_model: str
@@ -744,6 +805,8 @@ async def interrogate(
                 chain_key,
                 sys_p,
                 user_t,
+                temperature=float(_iq_cfg["temperature"]),
+                max_tokens=int(_iq_cfg["max_tokens"]),
                 requires_json=True,
                 image_b64=body.image_b64,
                 image_mime=body.image_mime or "image/jpeg",
@@ -751,10 +814,13 @@ async def interrogate(
                 fallback_single_role=cfg.interrogator_role,
             )
         else:
+            user_no_image = f"{interrogator_user_prompt()}\n\n{(body.patient_context_json or 'No extra text.')[:16000]}"
             r = lr.complete_for_role_chain(
                 chain_key,
                 sys_p,
-                user_text=(body.patient_context_json or "No extra text.")[:16000],
+                user_no_image,
+                temperature=float(_iq_cfg["temperature"]),
+                max_tokens=int(_iq_cfg["max_tokens"]),
                 requires_json=True,
                 use_web_on_first_openrouter=False,
                 fallback_single_role=cfg.interrogator_role,
@@ -854,8 +920,10 @@ async def interpret(
     (
         interpret_user_text_block,
         interpreter_system_prompt,
-        _d,
-        _iq,
+        _d_sys,
+        _d_usr,
+        _iq_sys,
+        _iq_usr,
         group_specialization_for,
         _lab,
     ) = _prompts()
