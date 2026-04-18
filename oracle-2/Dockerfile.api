@@ -1,0 +1,40 @@
+FROM python:3.11-slim
+
+# System deps
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Working dir
+WORKDIR /app
+
+ENV PIP_DEFAULT_TIMEOUT=300
+
+COPY oracle-2/requirements-api.txt .
+RUN pip install --no-cache-dir -r requirements-api.txt
+
+COPY packages/manthana-inference /tmp/manthana-inference
+RUN pip install --no-cache-dir /tmp/manthana-inference
+
+COPY config/cloud_inference.yaml /app/config/cloud_inference.yaml
+COPY oracle-2/orchestrator.py .
+COPY oracle-2/api.py .
+COPY oracle-2/services/shared/ ./services/shared/
+
+ENV CLOUD_INFERENCE_CONFIG_PATH=/app/config/cloud_inference.yaml
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s \
+  --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:8001/health || exit 1
+
+# Expose API port
+EXPOSE 8001
+
+# Start command
+CMD ["uvicorn", "api:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8001", \
+     "--workers", "2", \
+     "--log-level", "info"]
