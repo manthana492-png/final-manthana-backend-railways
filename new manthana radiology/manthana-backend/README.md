@@ -50,6 +50,21 @@ Gateway (:8000) → Routes by modality → 12 AI Services
 | ECG | 8013 | ECG (photo or signal data) |
 | Oral Cancer | 8014 | Oral cavity photos |
 
+## NVIDIA NIM (Premium 3D CT + optional chat roles)
+
+Secrets stay on the **gateway and GPU services** (Railway, Modal, Docker)—never in the Next.js client.
+
+| Variable | Purpose |
+|----------|---------|
+| `NVIDIA_NIM_API_KEY` | Bearer token for hosted NIM (build.nvidia.com / nvapi key) |
+| `NVIDIA_NIM_VISTA_INFER_URL` | POST URL for VISTA-3D inference (default in `.env.example`) |
+| `VISTA_BACKEND` | `nim` (default) or `local` (MONAI + local checkpoint only) |
+| `NIM_VISTA_IMAGE_URL` | Full HTTPS URL to a `.nii.gz` volume for tests |
+| `NIM_VISTA_PUBLIC_BASE_URL` + `NIM_VISTA_PUBLIC_SYNC_DIR` | Copy exported NIfTI to a web-served directory and build the public `image` URL for NIM |
+
+VISTA NIM expects JSON `{"image": "<https url to nifti>"}` per [NVIDIA VISTA-3D API](https://docs.nvidia.com/nim/medical/vista3d/latest/api-reference.html).  
+Optional **chat** roles use `provider: nim` in `config/cloud_inference.yaml` with `nim_base_url` and `NVIDIA_NIM_API_KEY` (OpenAI-compatible `/v1/chat/completions` on `integrate.api.nvidia.com`).
+
 ## License
 
 Proprietary — Manthana Radiology Suite  

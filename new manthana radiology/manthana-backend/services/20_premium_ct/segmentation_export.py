@@ -39,6 +39,29 @@ def volume_ml_for_class(
     return round(voxel_count * voxel_volume_ml, 3)
 
 
+def build_affine_from_spacing(spacing_xyz: tuple[float, float, float]) -> np.ndarray:
+    """Diagonal mm spacing → 4x4 NIfTI affine (LPS-style diagonal; sufficient for downstream I/O)."""
+    a = np.eye(4, dtype=np.float32)
+    a[0, 0] = float(spacing_xyz[0])
+    a[1, 1] = float(spacing_xyz[1])
+    a[2, 2] = float(spacing_xyz[2])
+    return a
+
+
+def export_ct_volume_nifti_gz(
+    volume: np.ndarray,
+    output_path: Path,
+    spacing_xyz: tuple[float, float, float],
+) -> Path:
+    """Write CT HU volume as compressed NIfTI for NVIDIA VISTA NIM (expects URL-accessible NIfTI)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    vol = np.asarray(volume, dtype=np.float32)
+    affine = build_affine_from_spacing(spacing_xyz)
+    img = nib.Nifti1Image(vol, affine)
+    nib.save(img, str(output_path))
+    return output_path
+
+
 def export_segmentation_nifti(
     segmentation_mask: np.ndarray,
     output_path: Path,

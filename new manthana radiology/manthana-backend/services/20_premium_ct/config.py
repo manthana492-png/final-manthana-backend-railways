@@ -18,6 +18,9 @@ VISTA3D_FULL_FORWARD = os.getenv("VISTA3D_FULL_FORWARD", "true").strip().lower()
     "yes",
 )
 
+# Segmentation backend: nim (default, NVIDIA NIM API) or local (MONAI + GPU checkpoint).
+VISTA_BACKEND = (os.getenv("VISTA_BACKEND") or "nim").strip().lower()
+
 
 def resolve_vista3d_checkpoint_path() -> str:
     """Prefer explicit env path; else first on-disk candidate (bootstrap vs legacy)."""

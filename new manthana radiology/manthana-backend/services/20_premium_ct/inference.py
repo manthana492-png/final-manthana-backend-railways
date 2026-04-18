@@ -19,7 +19,7 @@ from disclaimer import DISCLAIMER
 from preprocessing.ct_loader import is_degraded_single_slice, load_ct_volume
 from schemas import Finding
 from segmentation_export import export_segmentation_nifti, voxel_spacing_from_meta
-from vista3d_full_integration import run_vista3d_segmentation
+from vista3d_full_integration import run_vista3d_segmentation_auto
 
 import config as premium_config
 
@@ -30,12 +30,17 @@ PIPELINE_VERSION = "manthana-premium-ct-v1"
 def is_loaded() -> dict[str, Any]:
     resolved = premium_config.resolve_vista3d_checkpoint_path()
     checkpoints_present = os.path.isfile(resolved)
+    nim_key = (os.environ.get("NVIDIA_NIM_API_KEY") or "").strip()
+    vista_backend = (os.environ.get("VISTA_BACKEND") or "nim").strip().lower()
     return {
         "vista3d_enabled": premium_config.VISTA3D_ENABLED,
         "vista3d_full_forward": premium_config.VISTA3D_FULL_FORWARD,
         "vista3d_checkpoint_present": checkpoints_present,
         "vista3d_checkpoint_path": resolved,
         "vista3d_model_path_env": premium_config.VISTA3D_MODEL_PATH,
+        "vista_backend": vista_backend,
+        "nim_api_key_configured": bool(nim_key),
+        "nim_vista_infer_url": (os.environ.get("NVIDIA_NIM_VISTA_INFER_URL") or "").strip(),
     }
 
 
@@ -53,6 +58,20 @@ def _prompt_for_premium_ct(vista_results: dict[str, Any], patient_context: dict[
         "Return report sections: Technique, Findings by body system, Measurements, Impression, Recommendations."
     )
     return system, user_text
+
+
+def _vista_pathology_block(vista_results: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "classes_detected": vista_results.get("classes_detected"),
+        "class_scores": vista_results.get("class_scores"),
+        "volumes_ml": vista_results.get("volumes_ml"),
+        "region_analyzed": vista_results.get("region_analyzed"),
+    }
+    if vista_results.get("nim_infer_url"):
+        out["nim_infer_url"] = vista_results.get("nim_infer_url")
+        out["nim_image_url"] = vista_results.get("nim_image_url")
+        out["nim_latency_sec"] = vista_results.get("nim_latency_sec")
+    return out
 
 
 def _build_findings(vista_results: dict[str, Any]) -> list[Finding]:
@@ -106,12 +125,13 @@ def run_pipeline(
         )
     spacing_xyz = voxel_spacing_from_meta(meta if isinstance(meta, dict) else {})
 
-    vista_results = run_vista3d_segmentation(
+    vista_results = run_vista3d_segmentation_auto(
         volume=np.asarray(volume),
         spacing_xyz=spacing_xyz,
         model_path=premium_config.resolve_vista3d_checkpoint_path(),
         device=premium_config.DEVICE,
         region_hint=region_hint,
+        job_id=job_id,
     )
     seg_mask = vista_results.get("segmentation_mask")
     seg_path = ""
@@ -123,6 +143,8 @@ def run_pipeline(
 
     narrative = ""
     models_used = ["NVIDIA VISTA-3D", "MONAI"]
+    if vista_results.get("nim_infer_url"):
+        models_used = ["NVIDIA VISTA-3D NIM", "MONAI"]
     try:
         from llm_router import llm_router
 
@@ -153,12 +175,7 @@ def run_pipeline(
         "findings": findings,
         "impression": impression,
         "pathology_scores": {
-            "vista3d": {
-                "classes_detected": vista_results.get("classes_detected"),
-                "class_scores": vista_results.get("class_scores"),
-                "volumes_ml": vista_results.get("volumes_ml"),
-                "region_analyzed": vista_results.get("region_analyzed"),
-            }
+            "vista3d": _vista_pathology_block(vista_results),
         },
         "structures": {
             "segmentation_mask_path": seg_path,

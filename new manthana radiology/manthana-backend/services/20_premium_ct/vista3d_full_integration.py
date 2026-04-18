@@ -3,40 +3,16 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-logger = logging.getLogger("manthana.premium_ct.vista3d")
+from vista3d_labels import LABEL_DICT
 
-# Canonical subset used for reporting; segmentation mask still carries raw class ids.
-LABEL_DICT: dict[int, str] = {
-    1: "liver",
-    2: "right_lung",
-    3: "spleen",
-    4: "pancreas",
-    5: "right_kidney",
-    6: "aorta",
-    7: "inferior_vena_cava",
-    8: "portal_vein",
-    9: "left_lung",
-    10: "left_kidney",
-    22: "brain",
-    30: "urinary_bladder",
-    35: "prostate_or_uterus",
-    40: "heart",
-    48: "spinal_canal",
-    58: "colon",
-    66: "small_bowel",
-    77: "thoracic_aorta",
-    88: "femur_right",
-    89: "femur_left",
-    96: "vertebra_l5",
-    110: "vertebra_t12",
-    127: "miscellaneous_target",
-}
+logger = logging.getLogger("manthana.premium_ct.vista3d")
 
 
 def _load_state_dict(model_path: Path) -> dict[str, torch.Tensor]:
@@ -135,4 +111,49 @@ def run_vista3d_segmentation(
         "classes_detected": len(class_scores),
         "region_analyzed": region_hint or "full_body",
     }
+
+
+def run_vista3d_segmentation_auto(
+    *,
+    volume: np.ndarray,
+    spacing_xyz: tuple[float, float, float],
+    model_path: str,
+    device: str = "cuda",
+    region_hint: str | None = None,
+    job_id: str = "job",
+) -> dict[str, Any]:
+    """
+    Primary path: NVIDIA NIM (``VISTA_BACKEND=nim``, default). Rollback: ``VISTA_BACKEND=local``.
+    On NIM errors (missing URL, API failure), falls back to local MONAI checkpoint.
+    """
+    backend = (os.getenv("VISTA_BACKEND") or "nim").strip().lower()
+    if backend == "local":
+        return run_vista3d_segmentation(
+            volume=volume,
+            spacing_xyz=spacing_xyz,
+            model_path=model_path,
+            device=device,
+            region_hint=region_hint,
+        )
+    try:
+        from nim_vista_client import run_vista3d_segmentation_nim
+
+        return run_vista3d_segmentation_nim(
+            volume=volume,
+            spacing_xyz=spacing_xyz,
+            region_hint=region_hint,
+            job_id=job_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "VISTA NIM failed (%s); falling back to local MONAI checkpoint",
+            exc,
+        )
+        return run_vista3d_segmentation(
+            volume=volume,
+            spacing_xyz=spacing_xyz,
+            model_path=model_path,
+            device=device,
+            region_hint=region_hint,
+        )
 
