@@ -25,7 +25,7 @@ from typing import Annotated, Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Body
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi.staticfiles import StaticFiles
@@ -210,6 +210,31 @@ async def request_id_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = rid
     return response
+
+
+MAX_AI_REQUEST_BYTES = int(os.environ.get("MAX_AI_REQUEST_BYTES", 10 * 1024 * 1024))
+
+
+@app.middleware("http")
+async def limit_ai_request_size(request: Request, call_next):
+    """Reject oversized JSON bodies on /ai/* when Content-Length is set."""
+    if request.url.path.startswith("/ai/"):
+        cl = request.headers.get("content-length")
+        if cl:
+            try:
+                if int(cl) > MAX_AI_REQUEST_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "detail": (
+                                "Request too large. Please compress or resize before uploading."
+                            ),
+                            "max_bytes": MAX_AI_REQUEST_BYTES,
+                        },
+                    )
+            except ValueError:
+                pass
+    return await call_next(request)
 
 
 _JWT_SECRET_DEFAULT = "change-this-to-a-random-secret-minimum-32-chars"
@@ -463,6 +488,16 @@ async def analyze(
 
     # Forward to service (retries help Modal/serverless cold starts)
     rid = getattr(request.state, "request_id", None) or str(uuid.uuid4())
+    if canon in _PREMIUM_MODALITIES:
+        sub_tier = (request.headers.get("X-Subscription-Tier") or "free").strip().lower()
+        logging.getLogger("manthana.gateway").info(
+            "premium_3d_forward modality=%s service_url=%s subscription_tier=%s "
+            "request_id=%s model_provider=nim",
+            canon,
+            service_url,
+            sub_tier,
+            rid,
+        )
     try:
         response: Optional[httpx.Response] = None
         async with httpx.AsyncClient(timeout=600.0) as client:

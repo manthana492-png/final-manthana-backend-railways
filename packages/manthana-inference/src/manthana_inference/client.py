@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from openai import AsyncOpenAI, OpenAI
+from openai import APIStatusError, AsyncOpenAI, OpenAI
 
 from manthana_inference.loader import build_extra_headers
 from manthana_inference.schema import CloudInferenceConfig, RoleConfig
@@ -47,6 +47,27 @@ def build_openrouter_async_client(
         api_key=api_key.strip(),
         default_headers=headers or None,
     )
+
+
+def build_nim_sync_client(
+    api_key: str,
+    config: CloudInferenceConfig,
+) -> OpenAI:
+    """OpenAI-compatible client for NVIDIA NIM (chat/completions on integrate.api.nvidia.com/v1)."""
+    if not (api_key or "").strip():
+        raise ValueError("NVIDIA_NIM_API_KEY is empty")
+    base = config.nim_base_url.rstrip("/")
+    return OpenAI(base_url=base, api_key=api_key.strip())
+
+
+def build_nim_async_client(
+    api_key: str,
+    config: CloudInferenceConfig,
+) -> AsyncOpenAI:
+    if not (api_key or "").strip():
+        raise ValueError("NVIDIA_NIM_API_KEY is empty")
+    base = config.nim_base_url.rstrip("/")
+    return AsyncOpenAI(base_url=base, api_key=api_key.strip())
 
 
 def _openrouter_web_search_tools(web_search_parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -132,6 +153,15 @@ def merge_web_search_links(
     return merged[:_MAX_WEB_LINKS]
 
 
+def _openrouter_error_status(exc: BaseException) -> Optional[int]:
+    if isinstance(exc, APIStatusError):
+        return int(exc.status_code)
+    sc = getattr(exc, "status_code", None)
+    if isinstance(sc, int):
+        return sc
+    return None
+
+
 def chat_complete_sync(
     client: OpenAI,
     config: CloudInferenceConfig,
@@ -141,16 +171,74 @@ def chat_complete_sync(
     role_cfg: Optional[RoleConfig] = None,
     response_format: Optional[Dict[str, Any]] = None,
     web_search_parameters: Optional[Dict[str, Any]] = None,
+    openrouter_api_keys: Optional[List[str]] = None,
 ) -> tuple[str, str, Dict[str, Any]]:
-    """Return (content, model_used, usage_info). Tries primary + fallbacks."""
+    """Return (content, model_used, usage_info).
+
+    When ``openrouter_api_keys`` is set: outer loop models, inner loop keys
+    (429/401/403 retry next key; otherwise advance to next model).
+    When unset: legacy single-client behaviour (all models on that client).
+    """
     from manthana_inference.loader import resolve_role
 
     rc = role_cfg or resolve_role(config, role)
+    nim_mode = getattr(rc, "provider", "openrouter") == "nim"
+    ws_params = web_search_parameters
+    if web_search_parameters is not None and nim_mode:
+        logger.warning(
+            "Ignoring web_search_parameters for NIM provider role %s (OpenRouter-only tool)",
+            role,
+        )
+        ws_params = None
     models = [rc.model] + [m for m in rc.fallback_models if m]
     last_err: Optional[Exception] = None
+
+    keys_list = [k for k in (openrouter_api_keys or []) if (k or "").strip()]
+    if keys_list:
+        for model in models:
+            model_eff = _strip_openrouter_online_suffix(model) if ws_params else model
+            for api_key in keys_list:
+                try:
+                    c = build_openrouter_sync_client(api_key, config)
+                    kwargs: Dict[str, Any] = {
+                        "model": model_eff,
+                        "messages": messages,
+                        "max_tokens": rc.max_tokens,
+                        "temperature": rc.temperature,
+                    }
+                    if response_format is not None:
+                        kwargs["response_format"] = response_format
+                    if ws_params is not None:
+                        kwargs["tools"] = _openrouter_web_search_tools(ws_params)
+                    comp = c.chat.completions.create(**kwargs)
+                    text = (comp.choices[0].message.content or "").strip()
+                    usage = getattr(comp, "usage", None)
+                    usage_info: Dict[str, Any] = {}
+                    if usage is not None:
+                        try:
+                            usage_info = {
+                                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                                "total_tokens": getattr(usage, "total_tokens", 0),
+                            }
+                        except Exception:
+                            usage_info = {}
+                    return text, model_eff, usage_info
+                except Exception as e:
+                    last_err = e
+                    sc = _openrouter_error_status(e)
+                    if sc in (429, 401, 403):
+                        logger.debug(
+                            "openrouter model=%s status=%s — trying next key", model_eff, sc
+                        )
+                        continue
+                    logger.debug("openrouter model %s failed: %s", model_eff, e)
+                    break
+        raise RuntimeError(f"All models failed for role {role!r}: {last_err}")
+
     for model in models:
         try:
-            model_eff = _strip_openrouter_online_suffix(model) if web_search_parameters else model
+            model_eff = _strip_openrouter_online_suffix(model) if ws_params else model
             kwargs: Dict[str, Any] = {
                 "model": model_eff,
                 "messages": messages,
@@ -159,12 +247,12 @@ def chat_complete_sync(
             }
             if response_format is not None:
                 kwargs["response_format"] = response_format
-            if web_search_parameters is not None:
-                kwargs["tools"] = _openrouter_web_search_tools(web_search_parameters)
+            if ws_params is not None:
+                kwargs["tools"] = _openrouter_web_search_tools(ws_params)
             comp = client.chat.completions.create(**kwargs)
             text = (comp.choices[0].message.content or "").strip()
             usage = getattr(comp, "usage", None)
-            usage_info: Dict[str, Any] = {}
+            usage_info = {}
             if usage is not None:
                 try:
                     usage_info = {
@@ -190,16 +278,65 @@ async def chat_complete_async(
     role_cfg: Optional[RoleConfig] = None,
     response_format: Optional[Dict[str, Any]] = None,
     web_search_parameters: Optional[Dict[str, Any]] = None,
+    openrouter_api_keys: Optional[List[str]] = None,
 ) -> tuple[str, str, Dict[str, Any]]:
     """Return (content, model_used, usage_info). Tries primary + fallbacks."""
     from manthana_inference.loader import resolve_role
 
     rc = role_cfg or resolve_role(config, role)
+    nim_mode = getattr(rc, "provider", "openrouter") == "nim"
+    ws_params = web_search_parameters
+    if web_search_parameters is not None and nim_mode:
+        logger.warning(
+            "Ignoring web_search_parameters for NIM provider role %s (OpenRouter-only tool)",
+            role,
+        )
+        ws_params = None
     models = [rc.model] + [m for m in rc.fallback_models if m]
     last_err: Optional[Exception] = None
+
+    keys_list = [k for k in (openrouter_api_keys or []) if (k or "").strip()]
+    if keys_list:
+        for model in models:
+            model_eff = _strip_openrouter_online_suffix(model) if ws_params else model
+            for api_key in keys_list:
+                try:
+                    c = build_openrouter_async_client(api_key, config)
+                    kwargs: Dict[str, Any] = {
+                        "model": model_eff,
+                        "messages": messages,
+                        "max_tokens": rc.max_tokens,
+                        "temperature": rc.temperature,
+                    }
+                    if response_format is not None:
+                        kwargs["response_format"] = response_format
+                    if ws_params is not None:
+                        kwargs["tools"] = _openrouter_web_search_tools(ws_params)
+                    comp = await c.chat.completions.create(**kwargs)
+                    text = (comp.choices[0].message.content or "").strip()
+                    usage = getattr(comp, "usage", None)
+                    usage_info: Dict[str, Any] = {}
+                    if usage is not None:
+                        try:
+                            usage_info = {
+                                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                                "total_tokens": getattr(usage, "total_tokens", 0),
+                            }
+                        except Exception:
+                            usage_info = {}
+                    return text, model_eff, usage_info
+                except Exception as e:
+                    last_err = e
+                    sc = _openrouter_error_status(e)
+                    if sc in (429, 401, 403):
+                        continue
+                    break
+        raise RuntimeError(f"All models failed for role {role!r}: {last_err}")
+
     for model in models:
         try:
-            model_eff = _strip_openrouter_online_suffix(model) if web_search_parameters else model
+            model_eff = _strip_openrouter_online_suffix(model) if ws_params else model
             kwargs: Dict[str, Any] = {
                 "model": model_eff,
                 "messages": messages,
@@ -208,8 +345,8 @@ async def chat_complete_async(
             }
             if response_format is not None:
                 kwargs["response_format"] = response_format
-            if web_search_parameters is not None:
-                kwargs["tools"] = _openrouter_web_search_tools(web_search_parameters)
+            if ws_params is not None:
+                kwargs["tools"] = _openrouter_web_search_tools(ws_params)
             comp = await client.chat.completions.create(**kwargs)
             text = (comp.choices[0].message.content or "").strip()
             usage = getattr(comp, "usage", None)
@@ -245,13 +382,21 @@ async def stream_chat_async(
     from manthana_inference.loader import resolve_role
 
     rc = role_cfg or resolve_role(config, role)
+    nim_mode = getattr(rc, "provider", "openrouter") == "nim"
+    ws_params = web_search_parameters
+    if web_search_parameters is not None and nim_mode:
+        logger.warning(
+            "Ignoring web_search_parameters for NIM provider role %s (OpenRouter-only tool)",
+            role,
+        )
+        ws_params = None
     models = [rc.model] + [m for m in rc.fallback_models if m]
     last_err: Optional[Exception] = None
     for model in models:
         try:
             model_eff = (
                 _strip_openrouter_online_suffix(model)
-                if (web_search_parameters is not None or strip_online_suffix)
+                if (ws_params is not None or strip_online_suffix)
                 else model
             )
             kwargs: Dict[str, Any] = {
@@ -261,8 +406,8 @@ async def stream_chat_async(
                 "temperature": rc.temperature,
                 "stream": True,
             }
-            if web_search_parameters is not None:
-                kwargs["tools"] = _openrouter_web_search_tools(web_search_parameters)
+            if ws_params is not None:
+                kwargs["tools"] = _openrouter_web_search_tools(ws_params)
             stream = await client.chat.completions.create(**kwargs)
             saw_content = False
             accumulated: List[str] = []
@@ -273,19 +418,19 @@ async def stream_chat_async(
                     accumulated.append(ch.delta.content)
                     yield ch.delta.content, model_eff
             if saw_content:
-                if web_search_parameters is not None and completion_meta is not None:
+                if ws_params is not None and completion_meta is not None:
                     full_text = "".join(accumulated)
                     completion_meta["web_links"] = merge_web_search_links(full_text, None)
                 return
             # Server-side web search may not stream assistant text; fall back to one completion.
-            if web_search_parameters is not None:
+            if ws_params is not None:
                 comp = await client.chat.completions.create(
                     model=model_eff,
                     messages=messages,
                     max_tokens=rc.max_tokens,
                     temperature=rc.temperature,
                     stream=False,
-                    tools=_openrouter_web_search_tools(web_search_parameters),
+                    tools=_openrouter_web_search_tools(ws_params),
                 )
                 msg = comp.choices[0].message
                 text = (msg.content or "").strip()

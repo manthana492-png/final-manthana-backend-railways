@@ -83,6 +83,14 @@ Set each used modality to the Modal deployment URL (from `modal deploy`):
 | `PACS_BRIDGE_URL` | Default `http://pacs_bridge:8030`; skip PACS service at launch if unused. |
 | `UPLOAD_DIR`, `PDF_OUTPUT_DIR` | Temp dirs for heatmaps/reports. |
 | `GATEWAY_PORT` | Default `8000`. |
+| `MAX_AI_REQUEST_BYTES` | Default `10485760` (10MB). Rejects oversized `POST /ai/*` bodies when `Content-Length` is set. |
+| `AI_SESSION_TTL_SECONDS` | Default `300`. In-memory interrogation session lifetime. |
+| `AI_INTERROGATE_RATE_LIMIT_FREE` / `AI_INTERROGATE_RATE_LIMIT_PAID` / `AI_RATE_WINDOW_SECONDS` | Per-user `/ai/interrogate` limits (single-replica). |
+| `ORCH_ALLOWED_GROUPS` | Comma-separated groups (e.g. `reports,cardiac_functional`). Empty = allow all (dev). |
+| `AUDIT_LOG_PATH` | Optional path for JSON-line audit log (default `audit.log` in process cwd; ephemeral on Railway). |
+| `INTERROGATOR_XRAY_NIM_ENABLED` | Set `1` to try `interrogator_xray_nim` before OpenRouter for `xray` (requires `NVIDIA_NIM_API_KEY` and a valid NIM model slug). |
+
+**Frontend (Vercel):** set `NEXT_PUBLIC_ORCH_PHASE` to `A`, `B`, or `C` so the modality picker matches `ORCH_ALLOWED_GROUPS`.
 
 ### Gateway routes added for single-hostname Vercel
 

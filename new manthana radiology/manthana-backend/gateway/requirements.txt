@@ -14,6 +14,8 @@ torchxrayvision>=1.2
 scikit-image>=0.22
 numpy>=1.24
 Pillow>=10.0
+pydicom>=2.4.0
+pymupdf>=1.23.0
 
 # Case Embeddings (Parrotlet-e) + Vector Store
 transformers>=4.52.0

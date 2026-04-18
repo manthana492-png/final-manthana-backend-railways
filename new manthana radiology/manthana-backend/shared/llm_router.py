@@ -68,6 +68,7 @@ if _MI_SRC.is_dir() and str(_MI_SRC) not in sys.path:
     sys.path.insert(0, str(_MI_SRC))
 
 from manthana_inference import (  # type: ignore  # noqa: E402
+    build_nim_sync_client,
     build_openrouter_sync_client,
     chat_complete_sync,
     load_cloud_inference_config,
@@ -89,10 +90,29 @@ except Exception as e:
     logger.warning("Could not verify manthana-inference version: %s", e)
 
 # Create a safe wrapper for chat_complete_sync that handles any tuple format
-def safe_chat_complete_sync(client, config, role, messages, *, role_cfg=None, response_format=None, web_search_parameters=None):
+def safe_chat_complete_sync(
+    client,
+    config,
+    role,
+    messages,
+    *,
+    role_cfg=None,
+    response_format=None,
+    web_search_parameters=None,
+    openrouter_api_keys=None,
+):
     """Wrapper that ensures 3-tuple return regardless of manthana-inference version."""
     try:
-        result = chat_complete_sync(client, config, role, messages, role_cfg=role_cfg, response_format=response_format, web_search_parameters=web_search_parameters)
+        result = chat_complete_sync(
+            client,
+            config,
+            role,
+            messages,
+            role_cfg=role_cfg,
+            response_format=response_format,
+            web_search_parameters=web_search_parameters,
+            openrouter_api_keys=openrouter_api_keys,
+        )
         logger.debug("chat_complete_sync returned: %s", result)
         if isinstance(result, tuple) and len(result) == 3:
             return result
@@ -155,6 +175,10 @@ def _openrouter_keys() -> List[str]:
     return keys
 
 
+def _nim_api_key() -> str:
+    return (os.environ.get("NVIDIA_NIM_API_KEY") or "").strip()
+
+
 def _load_cfg():
     path = (os.environ.get("CLOUD_INFERENCE_CONFIG_PATH") or "").strip()
     return load_cloud_inference_config(Path(path) if path else (_REPO_ROOT / "config" / "cloud_inference.yaml"))
@@ -190,12 +214,7 @@ class LLMRouter:
         """
         if force_model:
             logger.warning("force_model parameter is deprecated; models are configured via cloud_inference.yaml")
-        
-        keys = _openrouter_keys()
-        if not keys:
-            raise ValueError(
-                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
-            )
+
         cfg = _load_cfg()
         role = _TASK_TO_ROLE.get(task_type)
         if role is None:
@@ -204,12 +223,15 @@ class LLMRouter:
         rc = rc.model_copy(update={"temperature": temperature, "max_tokens": max_tokens})
         messages = self._build_messages(system_prompt, prompt)
         fmt = {"type": "json_object"} if requires_json else None
-        last_err: Optional[Exception] = None
-        usage_info: Dict[str, Any] = {}
-        
-        for api_key in keys:
+
+        if getattr(rc, "provider", "openrouter") == "nim":
+            nim_key = _nim_api_key()
+            if not nim_key:
+                raise ValueError(
+                    "NVIDIA_NIM_API_KEY is required for NIM provider roles (see config/cloud_inference.yaml)."
+                )
             try:
-                client = build_openrouter_sync_client(api_key, cfg)
+                client = build_nim_sync_client(nim_key, cfg)
                 raw = safe_chat_complete_sync(
                     client,
                     cfg,
@@ -222,7 +244,6 @@ class LLMRouter:
                     text, model_used, usage_info = _safe_unpack_chat_result(raw)
                 except (ValueError, TypeError) as unpack_err:
                     logger.error("Failed to unpack chat result: %s. Raw result: %s", unpack_err, raw)
-                    # Fallback: try to extract what we can
                     if isinstance(raw, (tuple, list)) and len(raw) >= 2:
                         text, model_used = str(raw[0]), str(raw[1])
                         usage_info = {}
@@ -235,9 +256,39 @@ class LLMRouter:
                     "finish_reason": "stop",
                 }
             except Exception as e:
-                last_err = e
-                logger.warning("OpenRouter attempt failed: %s", e)
-        raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_err}")
+                raise RuntimeError(f"NIM completion failed for role {role!r}: {e}") from e
+
+        keys = _openrouter_keys()
+        if not keys:
+            raise ValueError(
+                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
+            )
+
+        client0 = build_openrouter_sync_client(keys[0], cfg)
+        raw = safe_chat_complete_sync(
+            client0,
+            cfg,
+            role,
+            list(messages),
+            role_cfg=rc,
+            response_format=fmt,
+            openrouter_api_keys=keys,
+        )
+        try:
+            text, model_used, usage_info = _safe_unpack_chat_result(raw)
+        except (ValueError, TypeError) as unpack_err:
+            logger.error("Failed to unpack chat result: %s. Raw result: %s", unpack_err, raw)
+            if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                text, model_used = str(raw[0]), str(raw[1])
+                usage_info = {}
+            else:
+                raise unpack_err
+        return {
+            "content": text,
+            "model_used": model_used,
+            "usage": usage_info or {},
+            "finish_reason": "stop",
+        }
 
     def complete_for_role(
         self,
@@ -257,11 +308,6 @@ class LLMRouter:
         Supports single image (image_b64) or multiple images (image_b64_list) for film-photo mode.
         Returns dict with content, model_used, and usage information.
         """
-        keys = _openrouter_keys()
-        if not keys:
-            raise ValueError(
-                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
-            )
         cfg = _load_cfg()
         rc = resolve_role(cfg, role)
         upd: Dict[str, Any] = {}
@@ -300,14 +346,15 @@ class LLMRouter:
         messages.append({"role": "user", "content": user_content})
 
         fmt: Optional[Dict[str, Any]] = {"type": "json_object"} if requires_json else None
-        last_err: Optional[Exception] = None
-        usage_info: Dict[str, Any] = {}
-        
-        for api_key in keys:
+
+        if getattr(rc, "provider", "openrouter") == "nim":
+            nim_key = _nim_api_key()
+            if not nim_key:
+                raise ValueError(
+                    "NVIDIA_NIM_API_KEY is required for NIM provider roles (see config/cloud_inference.yaml)."
+                )
             try:
-                logger.debug("Attempting OpenRouter call with role=%s", role)
-                client = build_openrouter_sync_client(api_key, cfg)
-                logger.debug("Built client for role=%s, calling chat_complete_sync", role)
+                client = build_nim_sync_client(nim_key, cfg)
                 raw = safe_chat_complete_sync(
                     client,
                     cfg,
@@ -316,17 +363,7 @@ class LLMRouter:
                     role_cfg=rc,
                     response_format=fmt,
                 )
-                logger.debug("chat_complete_sync returned for role=%s, raw result type: %s, len: %s", role, type(raw), len(raw) if hasattr(raw, '__len__') else 'N/A')
-                try:
-                    text, model_used, usage_info = _safe_unpack_chat_result(raw)
-                except (ValueError, TypeError) as unpack_err:
-                    logger.error("Failed to unpack chat result in role %s: %s. Raw result: %s", role, unpack_err, raw)
-                    # Fallback: try to extract what we can
-                    if isinstance(raw, (tuple, list)) and len(raw) >= 2:
-                        text, model_used = str(raw[0]), str(raw[1])
-                        usage_info = {}
-                    else:
-                        raise unpack_err
+                text, model_used, usage_info = _safe_unpack_chat_result(raw)
                 return {
                     "content": text,
                     "model_used": model_used,
@@ -334,9 +371,40 @@ class LLMRouter:
                     "finish_reason": "stop",
                 }
             except Exception as e:
-                last_err = e
-                logger.warning("OpenRouter role=%s attempt failed: %s", role, e)
-        raise RuntimeError(f"All OpenRouter keys failed for role {role!r}. Last error: {last_err}")
+                raise RuntimeError(f"NIM completion failed for role {role!r}: {e}") from e
+
+        keys = _openrouter_keys()
+        if not keys:
+            raise ValueError(
+                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
+            )
+
+        client0 = build_openrouter_sync_client(keys[0], cfg)
+        logger.debug("OpenRouter call role=%s (multi-key model failover)", role)
+        raw = safe_chat_complete_sync(
+            client0,
+            cfg,
+            role,
+            list(messages),
+            role_cfg=rc,
+            response_format=fmt,
+            openrouter_api_keys=keys,
+        )
+        try:
+            text, model_used, usage_info = _safe_unpack_chat_result(raw)
+        except (ValueError, TypeError) as unpack_err:
+            logger.error("Failed to unpack chat result in role %s: %s. Raw result: %s", role, unpack_err, raw)
+            if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                text, model_used = str(raw[0]), str(raw[1])
+                usage_info = {}
+            else:
+                raise unpack_err
+        return {
+            "content": text,
+            "model_used": model_used,
+            "usage": usage_info or {},
+            "finish_reason": "stop",
+        }
 
     def complete_for_role_with_web_search(
         self,
@@ -356,11 +424,6 @@ class LLMRouter:
         web_search_parameters example:
           {"max_results": 3, "max_total_results": 6, "allowed_domains": ["pubmed.ncbi.nlm.nih.gov"]}
         """
-        keys = _openrouter_keys()
-        if not keys:
-            raise ValueError(
-                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
-            )
         cfg = _load_cfg()
         rc = resolve_role(cfg, role)
         upd: Dict[str, Any] = {}
@@ -388,12 +451,20 @@ class LLMRouter:
         messages.append({"role": "user", "content": user_content})
 
         fmt: Optional[Dict[str, Any]] = {"type": "json_object"} if requires_json else None
-        last_err: Optional[Exception] = None
-        usage_info: Dict[str, Any] = {}
 
-        for api_key in keys:
+        if getattr(rc, "provider", "openrouter") == "nim":
+            if web_search_parameters:
+                logger.warning(
+                    "NIM provider ignores web_search_parameters for role=%s (OpenRouter-only tool)",
+                    role,
+                )
+            nim_key = _nim_api_key()
+            if not nim_key:
+                raise ValueError(
+                    "NVIDIA_NIM_API_KEY is required for NIM provider roles (see config/cloud_inference.yaml)."
+                )
             try:
-                client = build_openrouter_sync_client(api_key, cfg)
+                client = build_nim_sync_client(nim_key, cfg)
                 raw = safe_chat_complete_sync(
                     client,
                     cfg,
@@ -401,17 +472,9 @@ class LLMRouter:
                     list(messages),
                     role_cfg=rc,
                     response_format=fmt,
-                    web_search_parameters=web_search_parameters,
+                    web_search_parameters=None,
                 )
-                try:
-                    text, model_used, usage_info = _safe_unpack_chat_result(raw)
-                except (ValueError, TypeError) as unpack_err:
-                    logger.error("Failed to unpack chat result in role %s: %s", role, unpack_err)
-                    if isinstance(raw, (tuple, list)) and len(raw) >= 2:
-                        text, model_used = str(raw[0]), str(raw[1])
-                        usage_info = {}
-                    else:
-                        raise unpack_err
+                text, model_used, usage_info = _safe_unpack_chat_result(raw)
                 return {
                     "content": text,
                     "model_used": model_used,
@@ -419,9 +482,40 @@ class LLMRouter:
                     "finish_reason": "stop",
                 }
             except Exception as e:
-                last_err = e
-                logger.warning("OpenRouter role=%s web_search attempt failed: %s", role, e)
-        raise RuntimeError(f"All OpenRouter keys failed for role {role!r}. Last error: {last_err}")
+                raise RuntimeError(f"NIM completion failed for role {role!r}: {e}") from e
+
+        keys = _openrouter_keys()
+        if not keys:
+            raise ValueError(
+                "No LLM configured. Set OPENROUTER_API_KEY (see config/cloud_inference.yaml)."
+            )
+
+        client0 = build_openrouter_sync_client(keys[0], cfg)
+        raw = safe_chat_complete_sync(
+            client0,
+            cfg,
+            role,
+            list(messages),
+            role_cfg=rc,
+            response_format=fmt,
+            web_search_parameters=web_search_parameters,
+            openrouter_api_keys=keys,
+        )
+        try:
+            text, model_used, usage_info = _safe_unpack_chat_result(raw)
+        except (ValueError, TypeError) as unpack_err:
+            logger.error("Failed to unpack chat result in role %s: %s", role, unpack_err)
+            if isinstance(raw, (tuple, list)) and len(raw) >= 2:
+                text, model_used = str(raw[0]), str(raw[1])
+                usage_info = {}
+            else:
+                raise unpack_err
+        return {
+            "content": text,
+            "model_used": model_used,
+            "usage": usage_info or {},
+            "finish_reason": "stop",
+        }
 
     def complete_with_schema(
         self,
@@ -507,7 +601,8 @@ class LLMRouter:
     def get_model_info(self) -> dict:
         return {
             "strategy": self.strategy,
-            "provider": "openrouter",
+            "provider": "openrouter+nim",
+            "nim_configured": bool(_nim_api_key()),
             "config": str(_REPO_ROOT / "config" / "cloud_inference.yaml"),
         }
 
