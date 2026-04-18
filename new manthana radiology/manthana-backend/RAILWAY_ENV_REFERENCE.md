@@ -86,6 +86,8 @@ Set each used modality to the Modal deployment URL (from `modal deploy`):
 | `MAX_AI_REQUEST_BYTES` | Default `10485760` (10MB). For heavy DICOM-in-JSON uploads consider `20971520` (20MB). |
 | `AI_SESSION_TTL_SECONDS` | Default `300`. In-memory interrogation session lifetime. |
 | `AI_INTERROGATE_RATE_LIMIT_FREE` / `AI_INTERROGATE_RATE_LIMIT_PAID` / `AI_RATE_WINDOW_SECONDS` | Per-user `/ai/interrogate` limits (single-replica). |
+| `AI_LABS_FREE_LIFETIME_SCANS` | Default `3`. For tier `free` / `trial` / empty `X-Subscription-Tier`, caps **successful** `/ai/interpret` completions per JWT `sub` (lifetime). Paid tiers unlimited. Labs uses paid OpenRouter + NIM models for everyone; free tier is quota-only. |
+| `AI_LABS_LIFETIME_QUOTA_PATH` | Optional path to a JSON file storing `{user_id: count}` so lifetime counts survive process restarts (single instance; use a Railway volume if you rely on this). |
 | `ORCH_ALLOWED_GROUPS` | **Production launch (Phase C):** `reports,cardiac_functional,xray,ophthalmology_dental,oncology,ultrasound,pathology,specialized,nuclear,mri,ct`. Empty = allow all (convenient for dev only). |
 | `AUDIT_LOG_PATH` | Optional path for JSON-line audit log (default `audit.log` in process cwd; ephemeral on Railway). |
 | `AI_ORCH_INTERPRET_WEB_SEARCH` | `always` (default, Labs): allow OpenRouter `web_search` on the first eligible OpenRouter step in the interpreter chain (at most once per `/ai/interpret`). `paid_only`: only when tier is not `free`/`trial`/empty. `never` / `false`: no web search tool. |

@@ -729,6 +729,9 @@ async def interrogate(
     uid = _uid(token_data)
     tier = _tier(x_subscription_tier)
     enforce_rate_limit(uid, tier)
+    from labs_scan_quota import assert_labs_lifetime_quota
+
+    assert_labs_lifetime_quota(uid, tier)
 
     _, _, _, get_modality_config, _, validate_modality_key = _registry()
     (
@@ -956,6 +959,10 @@ async def interpret(
         )
         raise HTTPException(status_code=500, detail="Session modality invalid")
 
+    from labs_scan_quota import assert_labs_lifetime_quota, record_interpret_success
+
+    assert_labs_lifetime_quota(uid, tier)
+
     enable_web = _interpret_use_web_search(tier)
 
     qa_json = json.dumps([a.model_dump() for a in body.answers], ensure_ascii=False)
@@ -1069,6 +1076,7 @@ async def interpret(
         chain_attempts=_interpret_cm.get("attempts"),
         model_version=_model_version_for_slug(str(r.get("model_used") or "")),
     )
+    record_interpret_success(uid, tier)
     return {
         "report": report,
         "model_used": r.get("model_used"),

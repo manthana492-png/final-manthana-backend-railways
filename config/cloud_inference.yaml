@@ -385,14 +385,12 @@ roles:
     max_tokens: 8192
     temperature: 0.15
     fallback_models: *fb_labs
+  # Labs: same paid-grade stack as other interpreters (no openrouter/free). Free tier is quota-only.
   interpreter_free:
-    model: "moonshotai/kimi-k2.5:online"
-    max_tokens: 5000
+    model: "z-ai/glm-5.1"
+    max_tokens: 8192
     temperature: 0.15
-    fallback_models:
-      - "qwen/qwen2.5-vl-72b-instruct"
-      - "z-ai/glm-4.5v"
-      - "openai/gpt-4o-mini:online"
+    fallback_models: *fb_labs
   # Interpret stage NIM fallbacks (no web_search on NIM — used after OpenRouter primary in chains).
   interpreter_xray_nim:
     provider: nim
@@ -529,5 +527,6 @@ orch_chains:
     - interpreter_xray_nim
     - orch_last_resort_kimi
   interpreter_free:
-    - interpreter_free
+    - interpreter_complex_imaging
+    - interpreter_nim_v90
     - orch_last_resort_kimi
