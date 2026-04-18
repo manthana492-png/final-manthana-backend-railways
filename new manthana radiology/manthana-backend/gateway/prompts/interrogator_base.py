@@ -237,10 +237,12 @@ PROMPT_REGISTRY = {
         "max_tokens": 300,
         "response_format": {"type": "json_object"},
     },
+    # NIM Kimi K2 Instruct recommended temperature is 0.6; used for all interrogator roles.
+    # Kimi K2 Thinking uses 1.0 (reserved for interpreter/last-resort, not interrogator).
     "interrogator": {
         "system": interrogator_system_prompt,
         "user": interrogator_user_prompt,
-        "temperature": 0.3,
+        "temperature": 0.6,
         "max_tokens": 1200,
         "response_format": {"type": "json_object"},
     },
