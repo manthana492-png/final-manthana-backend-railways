@@ -266,76 +266,76 @@ roles:
     fallback_models: *fb_vision
   interrogator_xray:
     model: "qwen/qwen2.5-vl-72b-instruct"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   # NIM CXR interrogator (orch_chains.interrogator_xray); skipped when NVIDIA_NIM_API_KEY is unset. Validate slug via NIM GET /v1/models.
   interrogator_xray_nim:
     provider: nim
     model: "nvidia/nv-reason-cxr-3b"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: []
   interrogator_ct:
     model: "z-ai/glm-4.5v"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_mri:
     model: "z-ai/glm-4.5v"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_nuclear:
     model: "qwen/qwen2.5-vl-72b-instruct"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_ultrasound:
     model: "z-ai/glm-4.5v"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_ultrasound_nim:
     provider: nim
     model: "meta/llama-3.2-90b-vision-instruct"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: []
   interrogator_cardiac_functional:
     model: "deepseek/deepseek-r1-0528"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_labs
   interrogator_pathology:
     model: "z-ai/glm-4.5v"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_ophthalmology:
     model: "z-ai/glm-4.5v"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_ophthalmology_nim:
     provider: nim
     model: "meta/llama-3.2-90b-vision-instruct"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: []
   interrogator_oncology:
     model: "z-ai/glm-4.5v"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_specialized:
     model: "z-ai/glm-4.5v"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_reports:
     model: "deepseek/deepseek-v3.2"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_labs
   # Universal Manthana Labs interrogator: NIM Kimi K2 Instruct (primary via nvapi- key) →
@@ -344,13 +344,13 @@ roles:
   interrogator_nim_kimi_k2:
     provider: nim
     model: "moonshotai/kimi-k2-instruct"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.6
     fallback_models: []
   # OpenRouter fallback — Kimi K2 Instruct (moonshotai/kimi-k2) for structured clinical Q generation.
   interrogator_universal:
     model: "moonshotai/kimi-k2"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.6
     fallback_models:
       - "moonshotai/kimi-k2.5-thinking"
@@ -360,78 +360,78 @@ roles:
   interrogator_fb_nim_v90:
     provider: nim
     model: "meta/llama-3.2-90b-vision-instruct"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: []
   interrogator_fb_qwen72:
     model: "qwen/qwen2.5-vl-72b-instruct"
-    max_tokens: 2048
+    max_tokens: 3000
     temperature: 0.2
     fallback_models: *fb_vision
   orch_last_resort_kimi:
     model: "moonshotai/kimi-k2.5-thinking"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   interpreter_xray:
     model: "z-ai/glm-5.1"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   interpreter_complex_imaging:
     model: "z-ai/glm-5.1"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   interpreter_cardiac:
     model: "moonshotai/kimi-k2.5-thinking"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   interpreter_pathology_oncology:
     model: "z-ai/glm-5.1"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   interpreter_reports:
     model: "deepseek/deepseek-v3.2"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   interpreter_general_xray:
     model: "qwen/qwen-max"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   # Labs: same paid-grade stack as other interpreters (no openrouter/free). Free tier is quota-only.
   interpreter_free:
     model: "z-ai/glm-5.1"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
   # Interpret stage NIM fallbacks (no web_search on NIM — used after OpenRouter primary in chains).
   interpreter_xray_nim:
     provider: nim
     model: "nvidia/nv-reason-cxr-3b"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: []
   interpreter_nim_v90:
     provider: nim
     model: "meta/llama-3.2-90b-vision-instruct"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: []
   interpreter_reports_nim_fb:
     provider: nim
     model: "meta/llama-3.3-70b-instruct"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: []
   interpreter_cardiac_nim_fb:
     provider: nim
     model: "meta/llama-3.3-70b-instruct"
-    max_tokens: 8192
+    max_tokens: 16384
     temperature: 0.15
     fallback_models: []
 
