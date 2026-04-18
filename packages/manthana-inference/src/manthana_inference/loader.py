@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 import yaml
 
@@ -42,15 +42,42 @@ def load_cloud_inference_config(path: Optional[PathLike] = None) -> CloudInferen
             max_tokens=int(spec.get("max_tokens", default_max)),
             temperature=float(spec.get("temperature", default_temp)),
             fallback_models=list(spec.get("fallback_models") or []),
+            provider=str(spec.get("provider") or "openrouter").strip().lower() or "openrouter",
         )
+
+    orch_chains: Dict[str, List[str]] = {}
+    raw_chains = raw.get("orch_chains") or {}
+    if isinstance(raw_chains, dict):
+        for ck, chain in raw_chains.items():
+            key = str(ck).strip()
+            if not key:
+                continue
+            if isinstance(chain, list):
+                orch_chains[key] = [str(x).strip() for x in chain if str(x).strip()]
+            elif isinstance(chain, str) and chain.strip():
+                orch_chains[key] = [s.strip() for s in chain.split(",") if s.strip()]
+
+    model_versions: Dict[str, str] = {}
+    raw_versions = raw.get("model_versions") or {}
+    if isinstance(raw_versions, dict):
+        for mk, ver in raw_versions.items():
+            mks = str(mk).strip()
+            if mks and ver is not None:
+                model_versions[mks] = str(ver).strip()
+
     return CloudInferenceConfig(
         schema_version=str(raw.get("schema_version", "1")),
         openrouter_base_url=str(
             raw.get("openrouter_base_url") or "https://openrouter.ai/api/v1"
         ).rstrip("/"),
+        nim_base_url=str(
+            raw.get("nim_base_url") or "https://integrate.api.nvidia.com/v1"
+        ).rstrip("/"),
         header_env=dict(raw.get("header_env") or {}),
         defaults=dict(defaults),
         roles=roles,
+        orch_chains=orch_chains,
+        model_versions=model_versions,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -12,6 +13,22 @@ from manthana_inference.schema import CloudInferenceConfig, RoleConfig
 logger = logging.getLogger("manthana_inference.client")
 
 _ONLINE_SUFFIX = re.compile(r":online$")
+
+
+def _http_timeout_seconds(env_name: str, default: float = 120.0) -> float:
+    raw = (os.environ.get(env_name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+        return max(5.0, min(v, 600.0))
+    except ValueError:
+        return default
+
+
+def orchestration_http_timeout() -> float:
+    """Total request timeout for orchestration OpenRouter LLM calls."""
+    return _http_timeout_seconds("ORCH_OPENROUTER_TIMEOUT_S", 120.0)
 
 
 def _strip_openrouter_online_suffix(model: str) -> str:
@@ -31,6 +48,7 @@ def build_openrouter_sync_client(
         base_url=base,
         api_key=api_key.strip(),
         default_headers=headers or None,
+        timeout=orchestration_http_timeout(),
     )
 
 
@@ -46,6 +64,7 @@ def build_openrouter_async_client(
         base_url=base,
         api_key=api_key.strip(),
         default_headers=headers or None,
+        timeout=orchestration_http_timeout(),
     )
 
 
@@ -57,7 +76,8 @@ def build_nim_sync_client(
     if not (api_key or "").strip():
         raise ValueError("NVIDIA_NIM_API_KEY is empty")
     base = config.nim_base_url.rstrip("/")
-    return OpenAI(base_url=base, api_key=api_key.strip())
+    nim_t = _http_timeout_seconds("ORCH_NIM_TIMEOUT_S", 120.0)
+    return OpenAI(base_url=base, api_key=api_key.strip(), timeout=nim_t)
 
 
 def build_nim_async_client(
@@ -67,7 +87,8 @@ def build_nim_async_client(
     if not (api_key or "").strip():
         raise ValueError("NVIDIA_NIM_API_KEY is empty")
     base = config.nim_base_url.rstrip("/")
-    return AsyncOpenAI(base_url=base, api_key=api_key.strip())
+    nim_t = _http_timeout_seconds("ORCH_NIM_TIMEOUT_S", 120.0)
+    return AsyncOpenAI(base_url=base, api_key=api_key.strip(), timeout=nim_t)
 
 
 def _openrouter_web_search_tools(web_search_parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -367,6 +388,59 @@ async def chat_complete_async(
     raise RuntimeError(f"All models failed for role {role!r}: {last_err}")
 
 
+async def _async_stream_openrouter(
+    or_client: AsyncOpenAI,
+    rc: RoleConfig,
+    messages: List[Dict[str, Any]],
+    model_eff: str,
+    *,
+    ws_params: Optional[Dict[str, Any]],
+    completion_meta: Optional[Dict[str, Any]],
+) -> AsyncIterator[tuple[str, str]]:
+    """One OpenRouter client attempt: stream tokens, optional non-stream web-search fallback."""
+    kwargs: Dict[str, Any] = {
+        "model": model_eff,
+        "messages": messages,
+        "max_tokens": rc.max_tokens,
+        "temperature": rc.temperature,
+        "stream": True,
+    }
+    if ws_params is not None:
+        kwargs["tools"] = _openrouter_web_search_tools(ws_params)
+    stream = await or_client.chat.completions.create(**kwargs)
+    saw_content = False
+    accumulated: List[str] = []
+    async for chunk in stream:
+        ch = chunk.choices[0]
+        if ch.delta and ch.delta.content:
+            saw_content = True
+            accumulated.append(ch.delta.content)
+            yield ch.delta.content, model_eff
+    if saw_content:
+        if ws_params is not None and completion_meta is not None:
+            full_text = "".join(accumulated)
+            completion_meta["web_links"] = merge_web_search_links(full_text, None)
+        return
+    if ws_params is not None:
+        comp = await or_client.chat.completions.create(
+            model=model_eff,
+            messages=messages,
+            max_tokens=rc.max_tokens,
+            temperature=rc.temperature,
+            stream=False,
+            tools=_openrouter_web_search_tools(ws_params),
+        )
+        msg = comp.choices[0].message
+        text = (msg.content or "").strip()
+        if completion_meta is not None:
+            completion_meta["web_links"] = merge_web_search_links(
+                text,
+                getattr(msg, "annotations", None),
+            )
+        if text:
+            yield text, model_eff
+
+
 async def stream_chat_async(
     client: AsyncOpenAI,
     config: CloudInferenceConfig,
@@ -377,6 +451,7 @@ async def stream_chat_async(
     web_search_parameters: Optional[Dict[str, Any]] = None,
     strip_online_suffix: bool = False,
     completion_meta: Optional[Dict[str, Any]] = None,
+    openrouter_api_keys: Optional[List[str]] = None,
 ) -> AsyncIterator[tuple[str, str]]:
     """Yield (delta_text, model_id) from first successful model in chain."""
     from manthana_inference.loader import resolve_role
@@ -392,6 +467,42 @@ async def stream_chat_async(
         ws_params = None
     models = [rc.model] + [m for m in rc.fallback_models if m]
     last_err: Optional[Exception] = None
+
+    keys_list = [k for k in (openrouter_api_keys or []) if (k or "").strip()]
+    if keys_list:
+        for model in models:
+            model_eff = (
+                _strip_openrouter_online_suffix(model)
+                if (ws_params is not None or strip_online_suffix)
+                else model
+            )
+            for api_key in keys_list:
+                try:
+                    c = build_openrouter_async_client(api_key, config)
+                    async for delta, mid in _async_stream_openrouter(
+                        c,
+                        rc,
+                        messages,
+                        model_eff,
+                        ws_params=ws_params,
+                        completion_meta=completion_meta,
+                    ):
+                        yield delta, mid
+                    return
+                except Exception as e:
+                    last_err = e
+                    sc = _openrouter_error_status(e)
+                    if sc in (429, 401, 403):
+                        logger.debug(
+                            "openrouter stream model=%s status=%s — trying next key",
+                            model_eff,
+                            sc,
+                        )
+                        continue
+                    logger.warning("openrouter stream model %s failed: %s", model, e)
+                    break
+        raise RuntimeError(f"All stream models failed for role {role!r}: {last_err}")
+
     for model in models:
         try:
             model_eff = (
@@ -399,49 +510,15 @@ async def stream_chat_async(
                 if (ws_params is not None or strip_online_suffix)
                 else model
             )
-            kwargs: Dict[str, Any] = {
-                "model": model_eff,
-                "messages": messages,
-                "max_tokens": rc.max_tokens,
-                "temperature": rc.temperature,
-                "stream": True,
-            }
-            if ws_params is not None:
-                kwargs["tools"] = _openrouter_web_search_tools(ws_params)
-            stream = await client.chat.completions.create(**kwargs)
-            saw_content = False
-            accumulated: List[str] = []
-            async for chunk in stream:
-                ch = chunk.choices[0]
-                if ch.delta and ch.delta.content:
-                    saw_content = True
-                    accumulated.append(ch.delta.content)
-                    yield ch.delta.content, model_eff
-            if saw_content:
-                if ws_params is not None and completion_meta is not None:
-                    full_text = "".join(accumulated)
-                    completion_meta["web_links"] = merge_web_search_links(full_text, None)
-                return
-            # Server-side web search may not stream assistant text; fall back to one completion.
-            if ws_params is not None:
-                comp = await client.chat.completions.create(
-                    model=model_eff,
-                    messages=messages,
-                    max_tokens=rc.max_tokens,
-                    temperature=rc.temperature,
-                    stream=False,
-                    tools=_openrouter_web_search_tools(ws_params),
-                )
-                msg = comp.choices[0].message
-                text = (msg.content or "").strip()
-                if completion_meta is not None:
-                    completion_meta["web_links"] = merge_web_search_links(
-                        text,
-                        getattr(msg, "annotations", None),
-                    )
-                if text:
-                    yield text, model_eff
-                return
+            async for delta, mid in _async_stream_openrouter(
+                client,
+                rc,
+                messages,
+                model_eff,
+                ws_params=ws_params,
+                completion_meta=completion_meta,
+            ):
+                yield delta, mid
             return
         except Exception as e:
             last_err = e

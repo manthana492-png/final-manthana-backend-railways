@@ -39,8 +39,8 @@ OUTPUT: Return ONE JSON object only (no markdown code fences). Use this exact st
 
 {{
   "findings": {{
-    "primary": [{{"location": "...", "description": "...", "measurement": "...", "significance": "..."}}],
-    "secondary": [],
+    "primary": [{{"location": "...", "description": "...", "measurement": "...", "significance": "...", "confidence_pct": 0}}],
+    "secondary": [{{"location": "...", "description": "...", "measurement": "...", "significance": "...", "confidence_pct": 0}}],
     "negative_pertinents": ["..."]
   }},
   "impressions": {{
@@ -65,7 +65,8 @@ OUTPUT: Return ONE JSON object only (no markdown code fences). Use this exact st
 }}
 
 RULES:
-- confidence_pct across primary + all differentials MUST sum to 100
+- Every object in findings.primary and findings.secondary MUST include confidence_pct (integer 0–100) for how sure you are about that specific observation.
+- confidence_pct across impressions.primary_diagnosis + impressions.differentials MUST sum to 100
 - Never claim definitive malignancy — recommend biopsy/confirmation when needed
 - State limitations if image quality or modality is insufficient
 - Include negative pertinent findings where relevant

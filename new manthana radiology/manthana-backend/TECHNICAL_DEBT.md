@@ -38,7 +38,7 @@
 
 **Fix when:** Slug confirmed via `GET https://integrate.api.nvidia.com/v1/models` with `NVIDIA_NIM_API_KEY`.
 
-**Implementation:** Enable with `INTERROGATOR_XRAY_NIM_ENABLED=1` after verification.
+**Implementation:** Set `NVIDIA_NIM_API_KEY` and confirm the slug in `orch_chains.interrogator_xray` / `interrogator_xray_nim` against NIM `GET /v1/models`.
 
 ## TD-006: Multi-Slice DICOM Series
 

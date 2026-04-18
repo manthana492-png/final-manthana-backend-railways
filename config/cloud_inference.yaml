@@ -247,12 +247,29 @@ roles:
     max_tokens: 512
     temperature: 0.1
     fallback_models: *fb_vision
+  # NIM / OpenRouter chain for /ai/detect-modality (orch_chains.modality_detect). Skipped if no NVIDIA_NIM_API_KEY.
+  modality_detect_nim:
+    provider: nim
+    model: "meta/llama-3.2-11b-vision-instruct"
+    max_tokens: 512
+    temperature: 0.1
+    fallback_models: []
+  modality_detect_fb_qwen7b:
+    model: "qwen/qwen2.5-vl-7b-instruct"
+    max_tokens: 512
+    temperature: 0.1
+    fallback_models: *fb_vision
+  modality_detect_fb_gemma12b:
+    model: "google/gemma-3-12b-it"
+    max_tokens: 512
+    temperature: 0.1
+    fallback_models: *fb_vision
   interrogator_xray:
     model: "qwen/qwen2.5-vl-72b-instruct"
     max_tokens: 2048
     temperature: 0.2
     fallback_models: *fb_vision
-  # Optional NIM CXR interrogator — set INTERROGATOR_XRAY_NIM_ENABLED=1 and NVIDIA_NIM_API_KEY; verify slug via NIM /v1/models.
+  # NIM CXR interrogator (orch_chains.interrogator_xray); skipped when NVIDIA_NIM_API_KEY is unset. Validate slug via NIM GET /v1/models.
   interrogator_xray_nim:
     provider: nim
     model: "nvidia/nv-reason-cxr-3b"
@@ -275,10 +292,16 @@ roles:
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_ultrasound:
-    model: "bytedance/doubao-vision-pro"
+    model: "z-ai/glm-4.5v"
     max_tokens: 2048
     temperature: 0.2
     fallback_models: *fb_vision
+  interrogator_ultrasound_nim:
+    provider: nim
+    model: "meta/llama-3.2-90b-vision-instruct"
+    max_tokens: 2048
+    temperature: 0.2
+    fallback_models: []
   interrogator_cardiac_functional:
     model: "deepseek/deepseek-r1-0528"
     max_tokens: 2048
@@ -290,10 +313,16 @@ roles:
     temperature: 0.2
     fallback_models: *fb_vision
   interrogator_ophthalmology:
-    model: "bytedance/doubao-vision-pro"
+    model: "z-ai/glm-4.5v"
     max_tokens: 2048
     temperature: 0.2
     fallback_models: *fb_vision
+  interrogator_ophthalmology_nim:
+    provider: nim
+    model: "meta/llama-3.2-90b-vision-instruct"
+    max_tokens: 2048
+    temperature: 0.2
+    fallback_models: []
   interrogator_oncology:
     model: "z-ai/glm-4.5v"
     max_tokens: 2048
@@ -308,6 +337,23 @@ roles:
     model: "deepseek/deepseek-v3.2"
     max_tokens: 2048
     temperature: 0.2
+    fallback_models: *fb_labs
+  # Shared vision fallbacks for orchestration chains (NIM + OpenRouter).
+  interrogator_fb_nim_v90:
+    provider: nim
+    model: "meta/llama-3.2-90b-vision-instruct"
+    max_tokens: 2048
+    temperature: 0.2
+    fallback_models: []
+  interrogator_fb_qwen72:
+    model: "qwen/qwen2.5-vl-72b-instruct"
+    max_tokens: 2048
+    temperature: 0.2
+    fallback_models: *fb_vision
+  orch_last_resort_kimi:
+    model: "moonshotai/kimi-k2.5-thinking"
+    max_tokens: 8192
+    temperature: 0.15
     fallback_models: *fb_labs
   interpreter_xray:
     model: "z-ai/glm-5.1"
@@ -347,6 +393,31 @@ roles:
       - "qwen/qwen2.5-vl-72b-instruct"
       - "z-ai/glm-4.5v"
       - "openai/gpt-4o-mini:online"
+  # Interpret stage NIM fallbacks (no web_search on NIM — used after OpenRouter primary in chains).
+  interpreter_xray_nim:
+    provider: nim
+    model: "nvidia/nv-reason-cxr-3b"
+    max_tokens: 8192
+    temperature: 0.15
+    fallback_models: []
+  interpreter_nim_v90:
+    provider: nim
+    model: "meta/llama-3.2-90b-vision-instruct"
+    max_tokens: 8192
+    temperature: 0.15
+    fallback_models: []
+  interpreter_reports_nim_fb:
+    provider: nim
+    model: "meta/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.15
+    fallback_models: []
+  interpreter_cardiac_nim_fb:
+    provider: nim
+    model: "meta/llama-3.3-70b-instruct"
+    max_tokens: 8192
+    temperature: 0.15
+    fallback_models: []
 
   # Opt-in: NIM chat via integrate.api.nvidia.com (requires NVIDIA_NIM_API_KEY). Use role name in code or swap a primary role to nim.
   nim_chat_example:
@@ -355,3 +426,108 @@ roles:
     max_tokens: 4096
     temperature: 0.2
     fallback_models: []
+
+# --- Orchestration role chains (gateway /ai/*). Keys match logical stage or interrogator/interpreter role name.
+model_versions:
+  "z-ai/glm-4.5v": "2026-01-15"
+  "z-ai/glm-5.1": "2026-01-15"
+  "qwen/qwen2.5-vl-72b-instruct": "2025-12-01"
+  "qwen/qwen2.5-vl-7b-instruct": "2025-12-01"
+  "qwen/qwen-max": "2026-01-01"
+  "deepseek/deepseek-r1-0528": "2025-11-01"
+  "deepseek/deepseek-v3.2": "2026-01-01"
+  "moonshotai/kimi-k2.5-thinking": "2026-01-01"
+  "moonshotai/kimi-k2.5:online": "2026-01-01"
+  "nvidia/nv-reason-cxr-3b": "2025-03-01"
+  "meta/llama-3.2-11b-vision-instruct": "2024-11-01"
+  "meta/llama-3.2-90b-vision-instruct": "2024-11-01"
+  "meta/llama-3.3-70b-instruct": "2024-12-01"
+  "google/gemma-3-12b-it": "2026-01-01"
+
+orch_chains:
+  modality_detect:
+    - modality_detect_nim
+    - modality_detect_fb_qwen7b
+    - modality_detect_fb_gemma12b
+    - modality_detect
+  interrogator_xray:
+    - interrogator_xray_nim
+    - interrogator_xray
+    - interrogator_fb_nim_v90
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_ct:
+    - interrogator_ct
+    - interrogator_fb_nim_v90
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_mri:
+    - interrogator_mri
+    - interrogator_fb_nim_v90
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_nuclear:
+    - interrogator_nuclear
+    - interrogator_fb_nim_v90
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_ultrasound:
+    - interrogator_ultrasound_nim
+    - interrogator_ultrasound
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_cardiac_functional:
+    - interrogator_cardiac_functional
+    - interpreter_cardiac_nim_fb
+    - orch_last_resort_kimi
+  interrogator_pathology:
+    - interrogator_pathology
+    - interrogator_fb_nim_v90
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_ophthalmology:
+    - interrogator_ophthalmology_nim
+    - interrogator_ophthalmology
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_oncology:
+    - interrogator_oncology
+    - interrogator_fb_nim_v90
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_specialized:
+    - interrogator_specialized
+    - interrogator_fb_nim_v90
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
+  interrogator_reports:
+    - interrogator_reports
+    - interpreter_reports_nim_fb
+    - orch_last_resort_kimi
+  interpreter_xray:
+    - interpreter_xray
+    - interpreter_xray_nim
+    - orch_last_resort_kimi
+  interpreter_complex_imaging:
+    - interpreter_complex_imaging
+    - interpreter_nim_v90
+    - orch_last_resort_kimi
+  interpreter_cardiac:
+    - interpreter_cardiac
+    - interpreter_cardiac_nim_fb
+    - orch_last_resort_kimi
+  interpreter_pathology_oncology:
+    - interpreter_pathology_oncology
+    - interpreter_nim_v90
+    - orch_last_resort_kimi
+  interpreter_reports:
+    - interpreter_reports
+    - interpreter_reports_nim_fb
+    - orch_last_resort_kimi
+  interpreter_general_xray:
+    - interpreter_general_xray
+    - interpreter_xray_nim
+    - orch_last_resort_kimi
+  interpreter_free:
+    - interpreter_free
+    - orch_last_resort_kimi

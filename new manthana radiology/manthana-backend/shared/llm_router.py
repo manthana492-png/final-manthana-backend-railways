@@ -517,6 +517,107 @@ class LLMRouter:
             "finish_reason": "stop",
         }
 
+    def complete_for_role_chain(
+        self,
+        chain_key: str,
+        system_prompt: str,
+        user_text: str,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        requires_json: bool = False,
+        image_b64: Optional[str] = None,
+        image_mime: str = "image/jpeg",
+        web_search_parameters: Optional[Dict[str, Any]] = None,
+        use_web_on_first_openrouter: bool = False,
+        fallback_single_role: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Try ordered roles from cloud_inference.yaml ``orch_chains[chain_key]``.
+        Skips NIM roles when ``NVIDIA_NIM_API_KEY`` is unset.
+        When ``use_web_on_first_openrouter`` and ``web_search_parameters`` are set,
+        the first OpenRouter role in the chain uses ``complete_for_role_with_web_search``
+        exactly once (success or failure), then remaining OpenRouter steps use plain completion.
+        """
+        cfg = _load_cfg()
+        chains = getattr(cfg, "orch_chains", None) or {}
+        raw_chain = chains.get(chain_key)
+        role_names: List[str] = list(raw_chain) if isinstance(raw_chain, list) else []
+        if not role_names and fallback_single_role:
+            role_names = [fallback_single_role]
+        if not role_names:
+            raise ValueError(
+                f"No orch_chains[{chain_key!r}] in cloud_inference.yaml and fallback_single_role not set"
+            )
+
+        nim_key = _nim_api_key()
+        attempts: List[Dict[str, Any]] = []
+        web_search_used = False
+        web_attempted = False
+        last_err: Optional[BaseException] = None
+
+        for role in role_names:
+            try:
+                rc = resolve_role(cfg, role)
+            except KeyError:
+                logger.warning("orch_chains: unknown role %r in chain %r", role, chain_key)
+                continue
+            prov = (getattr(rc, "provider", "openrouter") or "openrouter").lower()
+            if prov == "nim" and not nim_key:
+                attempts.append({"role": role, "skipped": True, "reason": "no_nim_key"})
+                continue
+
+            is_openrouter = prov != "nim"
+            do_web = (
+                bool(web_search_parameters)
+                and use_web_on_first_openrouter
+                and is_openrouter
+                and not web_attempted
+            )
+            try:
+                if do_web:
+                    out = self.complete_for_role_with_web_search(
+                        role,
+                        system_prompt,
+                        user_text,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        requires_json=requires_json,
+                        image_b64=image_b64,
+                        image_mime=image_mime,
+                        web_search_parameters=web_search_parameters,
+                    )
+                    web_attempted = True
+                    web_search_used = True
+                else:
+                    out = self.complete_for_role(
+                        role,
+                        system_prompt,
+                        user_text,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        requires_json=requires_json,
+                        image_b64=image_b64,
+                        image_mime=image_mime,
+                    )
+                attempts.append({"role": role, "ok": True, "web": bool(do_web)})
+                out["chain_meta"] = {
+                    "chain_key": chain_key,
+                    "web_search_used": web_search_used,
+                    "attempts": list(attempts),
+                }
+                return out
+            except Exception as e:
+                last_err = e
+                attempts.append({"role": role, "ok": False, "error": str(e), "web": bool(do_web)})
+                if do_web:
+                    web_attempted = True
+                continue
+
+        raise RuntimeError(
+            f"orch chain {chain_key!r} exhausted after {role_names!r}: {last_err}"
+        ) from last_err
+
     def complete_with_schema(
         self,
         role: str,
@@ -618,6 +719,16 @@ def complete_for_role(
 ) -> Dict[str, Any]:
     """Module-level helper for modality services."""
     return llm_router.complete_for_role(role, system_prompt, user_text, **kwargs)
+
+
+def complete_for_role_chain(
+    chain_key: str,
+    system_prompt: str,
+    user_text: str,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Module-level helper for gateway orchestration chains."""
+    return llm_router.complete_for_role_chain(chain_key, system_prompt, user_text, **kwargs)
 
 
 def analyze_lab_report(structured_data: dict, raw_text: str) -> dict:

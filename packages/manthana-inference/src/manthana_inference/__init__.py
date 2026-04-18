@@ -1,6 +1,8 @@
 """Manthana OpenRouter SSOT — config load, role resolution, chat helpers."""
 
 from manthana_inference.client import (
+    build_nim_async_client,
+    build_nim_sync_client,
     build_openrouter_async_client,
     build_openrouter_sync_client,
     chat_complete_async,
@@ -15,6 +17,8 @@ __all__ = [
     "RoleConfig",
     "load_cloud_inference_config",
     "resolve_role",
+    "build_nim_sync_client",
+    "build_nim_async_client",
     "build_openrouter_sync_client",
     "build_openrouter_async_client",
     "chat_complete_sync",

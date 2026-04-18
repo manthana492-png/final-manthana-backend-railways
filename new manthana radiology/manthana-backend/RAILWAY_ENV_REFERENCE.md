@@ -83,14 +83,17 @@ Set each used modality to the Modal deployment URL (from `modal deploy`):
 | `PACS_BRIDGE_URL` | Default `http://pacs_bridge:8030`; skip PACS service at launch if unused. |
 | `UPLOAD_DIR`, `PDF_OUTPUT_DIR` | Temp dirs for heatmaps/reports. |
 | `GATEWAY_PORT` | Default `8000`. |
-| `MAX_AI_REQUEST_BYTES` | Default `10485760` (10MB). Rejects oversized `POST /ai/*` bodies when `Content-Length` is set. |
+| `MAX_AI_REQUEST_BYTES` | Default `10485760` (10MB). For heavy DICOM-in-JSON uploads consider `20971520` (20MB). |
 | `AI_SESSION_TTL_SECONDS` | Default `300`. In-memory interrogation session lifetime. |
 | `AI_INTERROGATE_RATE_LIMIT_FREE` / `AI_INTERROGATE_RATE_LIMIT_PAID` / `AI_RATE_WINDOW_SECONDS` | Per-user `/ai/interrogate` limits (single-replica). |
-| `ORCH_ALLOWED_GROUPS` | Comma-separated groups (e.g. `reports,cardiac_functional`). Empty = allow all (dev). |
+| `ORCH_ALLOWED_GROUPS` | **Production launch (Phase C):** `reports,cardiac_functional,xray,ophthalmology_dental,oncology,ultrasound,pathology,specialized,nuclear,mri,ct`. Empty = allow all (convenient for dev only). |
 | `AUDIT_LOG_PATH` | Optional path for JSON-line audit log (default `audit.log` in process cwd; ephemeral on Railway). |
-| `INTERROGATOR_XRAY_NIM_ENABLED` | Set `1` to try `interrogator_xray_nim` before OpenRouter for `xray` (requires `NVIDIA_NIM_API_KEY` and a valid NIM model slug). |
+| `AI_ORCH_INTERPRET_WEB_SEARCH` | `always` (default, Labs): allow OpenRouter `web_search` on the first eligible OpenRouter step in the interpreter chain (at most once per `/ai/interpret`). `paid_only`: only when tier is not `free`/`trial`/empty. `never` / `false`: no web search tool. |
+| `ORCH_OPENROUTER_TIMEOUT_S` | Optional; HTTP client timeout in seconds for OpenRouter orchestration calls (default `120`). |
+| `ORCH_NIM_TIMEOUT_S` | Optional; HTTP client timeout in seconds for NIM orchestration calls (default `120`). |
+| `NVIDIA_NIM_API_KEY` | When unset, all `provider: nim` roles in `orch_chains` are skipped automatically; interrogate/detect/interpret still use OpenRouter steps. Validate NIM model slugs with `GET https://integrate.api.nvidia.com/v1/models` before relying on vision/CXR roles. **Phase 2 (optional):** dedicated OCR via NVIDIA `nemoretriever-parse` (`/v1/parse`) is not wired in Phase 1; reports use gateway PDF/text extraction plus `interpreter_reports` / `orch_chains`. |
 
-**Frontend (Vercel):** set `NEXT_PUBLIC_ORCH_PHASE` to `A`, `B`, or `C` so the modality picker matches `ORCH_ALLOWED_GROUPS`.
+**Frontend (Vercel):** set `NEXT_PUBLIC_ORCH_PHASE` to `C` for full picker (default in app code), or `A`/`B` for staged rollout; values must match `ORCH_ALLOWED_GROUPS` on the gateway.
 
 ### Gateway routes added for single-hostname Vercel
 

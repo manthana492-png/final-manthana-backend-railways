@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 _audit_logger = logging.getLogger("manthana.audit")
 
@@ -35,8 +35,14 @@ def log_analysis_event(
     error_code: Optional[int] = None,
     image_mime: Optional[str] = None,
     session_id: Optional[str] = None,
+    **extra: Any,
 ) -> None:
-    """Log who did what (metadata only). Never pass image_b64 or patient text."""
+    """Log who did what (metadata only). Never pass image_b64 or patient text.
+
+    Optional ``extra`` keys (orchestration): ``stage``, ``chain_key``, ``latency_ms``,
+    ``input_sha256``, ``output_sha256``, ``web_search_used``, ``model_version``,
+    ``chain_attempts`` (serializable list/dict).
+    """
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "uid": user_id,
@@ -50,4 +56,7 @@ def log_analysis_event(
         "session": session_id,
         "err": error_code,
     }
-    _audit_logger.info(json.dumps(record, separators=(",", ":")))
+    for k, v in extra.items():
+        if v is not None:
+            record[k] = v
+    _audit_logger.info(json.dumps(record, separators=(",", ":"), default=str))

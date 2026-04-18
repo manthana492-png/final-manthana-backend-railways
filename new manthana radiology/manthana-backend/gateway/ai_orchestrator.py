@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -91,14 +93,6 @@ def _allowed_orch_groups() -> set[str]:
     if not raw:
         return set()
     return {g.strip().lower() for g in raw.split(",") if g.strip()}
-
-
-def _nim_xray_interrogator_enabled() -> bool:
-    return (os.getenv("INTERROGATOR_XRAY_NIM_ENABLED", "") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
 
 
 def _downscale_for_session(image_b64: str, max_px: int = 512) -> str:
@@ -193,6 +187,68 @@ def _llm():
     from llm_router import llm_router
 
     return llm_router
+
+
+def _interpret_use_web_search(tier: str) -> bool:
+    """Labs orchestration interpret: OpenRouter web search policy (default: always)."""
+    mode = (os.getenv("AI_ORCH_INTERPRET_WEB_SEARCH") or "always").strip().lower()
+    if mode in ("0", "false", "no", "never"):
+        return False
+    if mode in ("paid_only", "paid", "tier"):
+        return tier not in ("", "free", "trial")
+    return True
+
+
+def _orch_input_fingerprint(
+    *,
+    modality_key: Optional[str],
+    image_mime: Optional[str],
+    image_b64: Optional[str],
+    session_id: Optional[str],
+) -> str:
+    payload = {
+        "modality_key": modality_key or "",
+        "mime": image_mime or "",
+        "b64_len": len(image_b64 or ""),
+        "session": session_id or "",
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _sha256_text(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _model_version_for_slug(model_slug: str) -> Optional[str]:
+    try:
+        from manthana_inference.loader import load_cloud_inference_config
+
+        p = (os.environ.get("CLOUD_INFERENCE_CONFIG_PATH") or "").strip()
+        cfg = load_cloud_inference_config(Path(p) if p else None)
+        mv = getattr(cfg, "model_versions", None) or {}
+        return mv.get(model_slug) or mv.get(str(model_slug).split("/")[-1])
+    except Exception:
+        return None
+
+
+def _strip_model_disclaimer(report: Dict[str, Any]) -> None:
+    """Orchestrator-owned disclaimer only — never trust model-emitted disclaimer."""
+    report.pop("disclaimer", None)
+
+
+def _normalize_finding_confidence_pct(report: Dict[str, Any]) -> None:
+    """Ensure structured findings include confidence_pct (0–100) for UI/clinical consistency."""
+    findings = report.get("findings")
+    if not isinstance(findings, dict):
+        return
+    for bucket in ("primary", "secondary"):
+        arr = findings.get(bucket)
+        if not isinstance(arr, list):
+            continue
+        for item in arr:
+            if isinstance(item, dict) and "confidence_pct" not in item:
+                item["confidence_pct"] = 50
 
 
 def _registry():
@@ -510,23 +566,37 @@ async def detect_modality(
         user_text = f"Document text (excerpt):\n{(body.text_context or '')[:12000]}"
 
     try:
+        t0 = time.perf_counter()
         if body.image_b64:
-            r = llm.complete_for_role(
-                role="modality_detect",
-                system_prompt=system,
-                user_text=user_text,
+            r = llm.complete_for_role_chain(
+                "modality_detect",
+                system,
+                user_text,
                 requires_json=True,
                 image_b64=body.image_b64,
                 image_mime=body.image_mime or "image/jpeg",
+                use_web_on_first_openrouter=False,
+                fallback_single_role="modality_detect",
             )
         else:
-            r = llm.complete_for_role(
-                role="modality_detect",
-                system_prompt=system,
-                user_text=user_text,
+            r = llm.complete_for_role_chain(
+                "modality_detect",
+                system,
+                user_text,
                 requires_json=True,
+                use_web_on_first_openrouter=False,
+                fallback_single_role="modality_detect",
             )
         data = _parse_json_obj(r.get("content") or "{}")
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        cm = r.get("chain_meta") or {}
+        in_hash = _orch_input_fingerprint(
+            modality_key=str(data.get("modality_key")),
+            image_mime=body.image_mime,
+            image_b64=body.image_b64,
+            session_id=None,
+        )
+        out_hash = _sha256_text(str(r.get("content") or ""))
         log_analysis_event(
             uid,
             "detect",
@@ -536,6 +606,14 @@ async def detect_modality(
             model_used=str(r.get("model_used")),
             success=True,
             image_mime=body.image_mime,
+            stage="detect",
+            chain_key="modality_detect",
+            latency_ms=latency_ms,
+            input_sha256=in_hash,
+            output_sha256=out_hash,
+            web_search_used=bool(cm.get("web_search_used")),
+            chain_attempts=cm.get("attempts"),
+            model_version=_model_version_for_slug(str(r.get("model_used") or "")),
         )
     except HTTPException as e:
         log_analysis_event(
@@ -632,58 +710,43 @@ async def interrogate(
     lr = _llm()
     r: Dict[str, Any]
     interrogator_model: str
+    _interrogate_latency_ms = 0
+    _interrogate_cm: Dict[str, Any] = {}
+    _interrogate_in_hash = ""
+    _interrogate_out_hash = ""
     try:
-        if cfg.group == "xray" and _nim_xray_interrogator_enabled():
-            try:
-                if body.image_b64:
-                    r = lr.complete_for_role(
-                        role="interrogator_xray_nim",
-                        system_prompt=sys_p,
-                        user_text=user_t,
-                        requires_json=True,
-                        image_b64=body.image_b64,
-                        image_mime=body.image_mime or "image/jpeg",
-                    )
-                    interrogator_model = str(r.get("model_used", "interrogator_xray_nim"))
-                else:
-                    raise RuntimeError("NIM x-ray interrogator requires an image")
-            except Exception as nim_err:
-                logger.warning("NIM xray interrogator failed, falling back: %s", nim_err)
-                if body.image_b64:
-                    r = lr.complete_for_role(
-                        role=cfg.interrogator_role,
-                        system_prompt=sys_p,
-                        user_text=user_t,
-                        requires_json=True,
-                        image_b64=body.image_b64,
-                        image_mime=body.image_mime or "image/jpeg",
-                    )
-                else:
-                    r = lr.complete_for_role(
-                        role=cfg.interrogator_role,
-                        system_prompt=sys_p,
-                        user_text=(body.patient_context_json or "No extra text.")[:16000],
-                        requires_json=True,
-                    )
-                interrogator_model = str(r.get("model_used", cfg.interrogator_role))
-        elif body.image_b64:
-            r = lr.complete_for_role(
-                role=cfg.interrogator_role,
-                system_prompt=sys_p,
-                user_text=user_t,
+        t0 = time.perf_counter()
+        chain_key = cfg.interrogator_role
+        if body.image_b64:
+            r = lr.complete_for_role_chain(
+                chain_key,
+                sys_p,
+                user_t,
                 requires_json=True,
                 image_b64=body.image_b64,
                 image_mime=body.image_mime or "image/jpeg",
+                use_web_on_first_openrouter=False,
+                fallback_single_role=cfg.interrogator_role,
             )
-            interrogator_model = str(r.get("model_used", ""))
         else:
-            r = lr.complete_for_role(
-                role=cfg.interrogator_role,
-                system_prompt=sys_p,
+            r = lr.complete_for_role_chain(
+                chain_key,
+                sys_p,
                 user_text=(body.patient_context_json or "No extra text.")[:16000],
                 requires_json=True,
+                use_web_on_first_openrouter=False,
+                fallback_single_role=cfg.interrogator_role,
             )
-            interrogator_model = str(r.get("model_used", ""))
+        interrogator_model = str(r.get("model_used", ""))
+        _interrogate_latency_ms = int((time.perf_counter() - t0) * 1000)
+        _interrogate_cm = r.get("chain_meta") or {}
+        _interrogate_in_hash = _orch_input_fingerprint(
+            modality_key=cfg.key,
+            image_mime=body.image_mime,
+            image_b64=body.image_b64,
+            session_id=None,
+        )
+        _interrogate_out_hash = _sha256_text(str(r.get("content") or ""))
         qdata = _parse_json_obj(r.get("content") or "{}")
         questions = qdata.get("questions") or []
     except HTTPException as e:
@@ -739,6 +802,14 @@ async def interrogate(
         success=True,
         image_mime=body.image_mime,
         session_id=sid,
+        stage="interrogate",
+        chain_key=cfg.interrogator_role,
+        latency_ms=_interrogate_latency_ms or None,
+        input_sha256=_interrogate_in_hash or None,
+        output_sha256=_interrogate_out_hash or None,
+        web_search_used=bool(_interrogate_cm.get("web_search_used")),
+        chain_attempts=_interrogate_cm.get("attempts"),
+        model_version=_model_version_for_slug(str(r.get("model_used") or "")),
     )
     return {
         "session_id": sid,
@@ -795,7 +866,7 @@ async def interpret(
         )
         raise HTTPException(status_code=500, detail="Session modality invalid")
 
-    enable_web = tier not in ("", "free", "trial")
+    enable_web = _interpret_use_web_search(tier)
 
     qa_json = json.dumps([a.model_dump() for a in body.answers], ensure_ascii=False)
     pc = body.patient_context_json or row.get("patient_context_json")
@@ -811,31 +882,46 @@ async def interpret(
 
     llm = _llm()
     r: Dict[str, Any]
+    _interpret_latency_ms = 0
+    _interpret_cm: Dict[str, Any] = {}
+    _interpret_in_hash = ""
+    _interpret_out_hash = ""
+    chain_key = cfg.interpreter_role
     try:
         img = row.get("image_b64")
         mime = row.get("image_mime") or "image/jpeg"
+        t0 = time.perf_counter()
+        r = llm.complete_for_role_chain(
+            chain_key,
+            sys_p,
+            user_t,
+            requires_json=True,
+            image_b64=img,
+            image_mime=mime,
+            web_search_parameters=WEB_SEARCH_PARAMETERS if enable_web else None,
+            use_web_on_first_openrouter=enable_web,
+            fallback_single_role=cfg.interpreter_role,
+        )
+        _interpret_latency_ms = int((time.perf_counter() - t0) * 1000)
+        _interpret_cm = r.get("chain_meta") or {}
+        _interpret_in_hash = _orch_input_fingerprint(
+            modality_key=cfg.key,
+            image_mime=mime,
+            image_b64=img,
+            session_id=body.session_id,
+        )
+        _interpret_out_hash = _sha256_text(str(r.get("content") or ""))
 
-        if enable_web:
-            r = llm.complete_for_role_with_web_search(
-                role=cfg.interpreter_role,
-                system_prompt=sys_p,
-                user_text=user_t,
-                requires_json=True,
-                image_b64=img,
-                image_mime=mime,
-                web_search_parameters=WEB_SEARCH_PARAMETERS,
-            )
+        raw_content = r.get("content") or "{}"
+        try:
+            parsed = _parse_json_obj(str(raw_content))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            report = {"report_text": _strip_json_fence(str(raw_content))}
         else:
-            r = llm.complete_for_role(
-                role="interpreter_free",
-                system_prompt=sys_p,
-                user_text=user_t,
-                requires_json=True,
-                image_b64=img,
-                image_mime=mime,
-            )
-
-        report = _parse_json_obj(r.get("content") or "{}")
+            report = parsed if isinstance(parsed, dict) else {"report_text": str(parsed)}
+        if isinstance(report, dict):
+            _strip_model_disclaimer(report)
+            _normalize_finding_confidence_pct(report)
         report.setdefault("models_used", [])
         if isinstance(report["models_used"], list):
             report["models_used"] = list(report["models_used"]) + [str(r.get("model_used"))]
@@ -850,6 +936,8 @@ async def interpret(
             success=False,
             error_code=e.status_code,
             session_id=body.session_id,
+            stage="interpret",
+            chain_key=chain_key,
         )
         raise
     except Exception as e:
@@ -863,6 +951,11 @@ async def interpret(
             success=False,
             error_code=502,
             session_id=body.session_id,
+            stage="interpret",
+            chain_key=chain_key,
+            latency_ms=_interpret_latency_ms or None,
+            web_search_used=bool(_interpret_cm.get("web_search_used")),
+            chain_attempts=_interpret_cm.get("attempts"),
         )
         raise HTTPException(status_code=502, detail=str(e)) from e
     finally:
@@ -877,6 +970,14 @@ async def interpret(
         model_used=str(r.get("model_used")),
         success=True,
         session_id=body.session_id,
+        stage="interpret",
+        chain_key=chain_key,
+        latency_ms=_interpret_latency_ms or None,
+        input_sha256=_interpret_in_hash or None,
+        output_sha256=_interpret_out_hash or None,
+        web_search_used=bool(_interpret_cm.get("web_search_used")),
+        chain_attempts=_interpret_cm.get("attempts"),
+        model_version=_model_version_for_slug(str(r.get("model_used") or "")),
     )
     return {
         "report": report,
