@@ -76,8 +76,24 @@ def _strip_json_fence(s: str) -> str:
 
 
 def _parse_json_obj(s: str) -> Dict[str, Any]:
-    raw = _strip_json_fence(s)
-    return json.loads(raw)
+    """Parse model JSON; empty/whitespace-only (after fences) becomes {}.
+
+    Models sometimes return whitespace or non-JSON prose; callers must handle {}.
+    """
+    raw = _strip_json_fence(str(s) if s is not None else "")
+    if not raw.strip():
+        return {}
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Invalid JSON from model ({e}); preview={raw[:200]!r}"
+        ) from e
+    if not isinstance(out, dict):
+        raise ValueError(
+            f"Model JSON root must be an object, got {type(out).__name__}; preview={raw[:200]!r}"
+        )
+    return out
 
 
 def _inject_disclaimer(report: Dict[str, Any]) -> Dict[str, Any]:
@@ -425,7 +441,7 @@ async def pre_validate(
                 user_text=user_prompt,
                 requires_json=True,
             )
-        data = _parse_json_obj(r.get("content") or "{}")
+        data = _parse_json_obj(str(r.get("content") or ""))
         log_analysis_event(
             uid,
             "pre_validate",
@@ -587,7 +603,13 @@ async def detect_modality(
                 use_web_on_first_openrouter=False,
                 fallback_single_role="modality_detect",
             )
-        data = _parse_json_obj(r.get("content") or "{}")
+        data = _parse_json_obj(str(r.get("content") or ""))
+        mk_detected = str(data.get("modality_key") or "").strip()
+        if not mk_detected:
+            raise HTTPException(
+                status_code=502,
+                detail="Modality model returned empty or invalid JSON (no modality_key). Retry or check OpenRouter / modality_detect chain.",
+            )
         latency_ms = int((time.perf_counter() - t0) * 1000)
         cm = r.get("chain_meta") or {}
         in_hash = _orch_input_fingerprint(
@@ -747,7 +769,7 @@ async def interrogate(
             session_id=None,
         )
         _interrogate_out_hash = _sha256_text(str(r.get("content") or ""))
-        qdata = _parse_json_obj(r.get("content") or "{}")
+        qdata = _parse_json_obj(str(r.get("content") or ""))
         questions = qdata.get("questions") or []
     except HTTPException as e:
         log_analysis_event(
