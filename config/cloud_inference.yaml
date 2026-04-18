@@ -338,6 +338,24 @@ roles:
     max_tokens: 2048
     temperature: 0.2
     fallback_models: *fb_labs
+  # Universal Manthana Labs interrogator: NIM Kimi K2 Instruct (primary via nvapi- key) →
+  # OpenRouter Kimi K2 (instruct/non-thinking, fast JSON output) as text-only fallback.
+  # NIM slug: moonshotai/kimi-k2-instruct @ integrate.api.nvidia.com/v1 (recommended temp: 0.6)
+  interrogator_nim_kimi_k2:
+    provider: nim
+    model: "moonshotai/kimi-k2-instruct"
+    max_tokens: 2048
+    temperature: 0.6
+    fallback_models: []
+  # OpenRouter fallback — Kimi K2 Instruct (moonshotai/kimi-k2) for structured clinical Q generation.
+  interrogator_universal:
+    model: "moonshotai/kimi-k2"
+    max_tokens: 2048
+    temperature: 0.6
+    fallback_models:
+      - "moonshotai/kimi-k2.5-thinking"
+      - "qwen/qwen2.5-vl-72b-instruct"
+      - "z-ai/glm-4.5v"
   # Shared vision fallbacks for orchestration chains (NIM + OpenRouter).
   interrogator_fb_nim_v90:
     provider: nim
@@ -436,6 +454,8 @@ model_versions:
   "deepseek/deepseek-v3.2": "2026-01-01"
   "moonshotai/kimi-k2.5-thinking": "2026-01-01"
   "moonshotai/kimi-k2.5:online": "2026-01-01"
+  "moonshotai/kimi-k2-instruct": "2025-07-01"
+  "moonshotai/kimi-k2": "2025-07-01"
   "nvidia/nv-reason-cxr-3b": "2025-03-01"
   "meta/llama-3.2-11b-vision-instruct": "2024-11-01"
   "meta/llama-3.2-90b-vision-instruct": "2024-11-01"
@@ -448,6 +468,18 @@ orch_chains:
     - modality_detect_fb_qwen7b
     - modality_detect_fb_gemma12b
     - modality_detect
+  # Universal interrogator chain:
+  # 1. NIM Kimi K2 Instruct (nvapi- key, fast structured output, skipped if no key)
+  # 2. NIM Llama-3.2-90B vision (skipped if no key)
+  # 3. OpenRouter Kimi K2 Instruct (text/non-vision, fast JSON)
+  # 4. OpenRouter Qwen-72B vision (vision fallback)
+  # 5. Kimi K2.5 Thinking last resort
+  interrogator_universal:
+    - interrogator_nim_kimi_k2
+    - interrogator_fb_nim_v90
+    - interrogator_universal
+    - interrogator_fb_qwen72
+    - orch_last_resort_kimi
   interrogator_xray:
     - interrogator_xray_nim
     - interrogator_xray

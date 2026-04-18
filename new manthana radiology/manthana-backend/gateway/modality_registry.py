@@ -6,19 +6,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
-# Group id -> interrogator role name in cloud_inference.yaml
+# Group id -> interrogator role name in cloud_inference.yaml (orch_chains key).
+# All groups use one universal chain: Kimi K2.5 Thinking + NIM vision + Qwen + terminal Kimi.
 INTERROGATOR_ROLE_BY_GROUP: Dict[str, str] = {
-    "xray": "interrogator_xray",
-    "ct": "interrogator_ct",
-    "mri": "interrogator_mri",
-    "nuclear": "interrogator_nuclear",
-    "ultrasound": "interrogator_ultrasound",
-    "cardiac_functional": "interrogator_cardiac_functional",
-    "specialized": "interrogator_specialized",
-    "pathology": "interrogator_pathology",
-    "oncology": "interrogator_oncology",
-    "ophthalmology_dental": "interrogator_ophthalmology",
-    "reports": "interrogator_reports",
+    "xray": "interrogator_universal",
+    "ct": "interrogator_universal",
+    "mri": "interrogator_universal",
+    "nuclear": "interrogator_universal",
+    "ultrasound": "interrogator_universal",
+    "cardiac_functional": "interrogator_universal",
+    "specialized": "interrogator_universal",
+    "pathology": "interrogator_universal",
+    "oncology": "interrogator_universal",
+    "ophthalmology_dental": "interrogator_universal",
+    "reports": "interrogator_universal",
 }
 
 MODALITY_GROUPS_META: Dict[str, Dict[str, object]] = {

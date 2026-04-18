@@ -1021,7 +1021,8 @@ async def interpret(
             _normalize_finding_confidence_pct(report)
         report.setdefault("models_used", [])
         if isinstance(report["models_used"], list):
-            report["models_used"] = list(report["models_used"]) + [str(r.get("model_used"))]
+            # Do not append OpenRouter/NIM routing slugs to the patient-facing report payload.
+            report["models_used"] = list(report["models_used"])
         report = _inject_disclaimer(report)
     except HTTPException as e:
         log_analysis_event(
