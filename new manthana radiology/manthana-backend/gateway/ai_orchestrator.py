@@ -51,7 +51,7 @@ _DISCLAIMER = {
     "regulatory_note": "SaMD — Not approved for autonomous clinical diagnosis. India MDR 2017 compliant.",
 }
 
-TEXT_ONLY_SESSION_GROUPS = frozenset({"reports", "cardiac_functional"})
+TEXT_ONLY_SESSION_GROUPS = frozenset({"reports"})
 
 
 def _orch_enabled() -> bool:
