@@ -403,6 +403,16 @@ roles:
     max_tokens: 16384
     temperature: 0.15
     fallback_models: *fb_labs
+  # ── Combined detect+interrogate (single-pass, Stage 1+2) ──────────────────────────────────
+  # Primary: Kimi K2.5 Thinking — vision+reasoning; fallbacks are vision-capable & cheaper.
+  detect_interrogate_combined:
+    model: "moonshotai/kimi-k2.5-thinking"
+    max_tokens: 4500
+    temperature: 0.6
+    fallback_models:
+      - "qwen/qwen2.5-vl-72b-instruct"
+      - "z-ai/glm-4.5v"
+
   # Labs: same paid-grade stack as other interpreters (no openrouter/free). Free tier is quota-only.
   interpreter_free:
     model: "z-ai/glm-5.1"
@@ -561,4 +571,10 @@ orch_chains:
   interpreter_free:
     - interpreter_complex_imaging
     - interpreter_nim_v90
+    - orch_last_resort_kimi
+  # Single-pass detect+interrogate chain (replaces separate detect → interrogate round-trips).
+  # Primary Kimi K2.5 Thinking (vision+thinking) handles both tasks.
+  detect_and_interrogate:
+    - detect_interrogate_combined
+    - interrogator_fb_qwen72
     - orch_last_resort_kimi

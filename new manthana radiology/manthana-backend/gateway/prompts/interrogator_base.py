@@ -281,6 +281,149 @@ Generate the clinical questions for this study. Respond with ONLY the JSON objec
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STAGE 1+2 COMBINED — DETECT + INTERROGATE  (single-pass, Kimi K2.5 Thinking)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_and_interrogate_system_prompt(
+    *,
+    modality_list_text: str,
+    patient_age: "int | None" = None,
+    patient_sex: "str | None" = None,
+    clinical_context: "str | None" = None,
+) -> str:
+    """Single-pass: detect modality AND generate clinical questions in one LLM call.
+
+    Primary model: moonshotai/kimi-k2.5-thinking (vision + extended reasoning).
+    Fallbacks:     qwen/qwen2.5-vl-72b-instruct → z-ai/glm-4.5v  (both vision-capable).
+    Replaces the separate /ai/detect-modality + /ai/interrogate round-trips.
+    """
+    patient_block = ""
+    if patient_age or patient_sex:
+        parts = []
+        if patient_age:
+            parts.append(f"Age: {patient_age}y")
+        if patient_sex:
+            parts.append(f"Sex: {patient_sex}")
+        patient_block = f"\nKNOWN PATIENT CONTEXT: {', '.join(parts)}"
+
+    clinical_block = ""
+    if clinical_context:
+        clinical_block = f"\nCLINICAL NOTE FROM REFERRING PHYSICIAN: {clinical_context}"
+
+    group_focus_lines = "\n".join(
+        f"  {grp}: {focus}"
+        for grp, focus in _MODALITY_CLINICAL_FOCUS.items()
+    )
+
+    return f"""\
+{_CLINICAL_AUTHORITY_BLOCK}
+
+ROLE: Dual-Mode Clinical AI — Stage 1+2 of the Manthana Labs diagnostic pipeline.
+You perform TWO tasks simultaneously in a single pass:
+
+  TASK A — MODALITY DETECTION: Identify the exact modality of the uploaded study
+            from the approved 95-modality registry below.
+  TASK B — CLINICAL INTERROGATION: Based on the detected modality, immediately generate
+            the highest-impact clinical context questions for the referring clinician.{patient_block}{clinical_block}
+
+══════════════════════════════════════════
+APPROVED MODALITY REGISTRY (pick exactly ONE key):
+{modality_list_text}
+══════════════════════════════════════════
+
+TASK A — DETECTION STRATEGY:
+1. Examine primary imaging characteristics:
+   • ECG/Holter: ruled paper (typically pink/red), multi-lead waveform traces, timing marks,
+     voltage grid, lead labels (I II III aVR aVL aVF V1-V6). Do NOT confuse with X-Ray.
+   • X-Ray: greyscale, high-contrast bones/air/soft-tissue, flat 2-D projection (AP/PA/Lateral).
+   • CT: cross-sectional axial/coronal/sagittal slices, Hounsfield density gradients, often with HU scale.
+   • MRI: multi-sequence slices (T1/T2/FLAIR/DWI), tissue signal intensity gradients, no bone bright.
+   • Ultrasound: fan-shaped or rectangular greyscale, speckle noise, fan shadow artefacts.
+   • Pathology: stained tissue sections (H&E pink/purple, IHC DAB brown), microscopy, cytology smears.
+   • PET/Nuclear: colour-mapped metabolic uptake maps, whole-body or organ-specific scans.
+   • Fundus/OCT: retinal colour disc image or OCT B-scan cross-section.
+   • Documents/Reports: text-dominant, no imaging pixels — use "lab_report", "radiology_report", etc.
+2. For ambiguous images: choose the highest-probability key; set confidence accurately (≤ 0.55).
+3. Non-medical: use modality_key "unknown", confidence < 0.20.
+
+URGENCY FLAGS:
+- "Stat":     visible pneumothorax, intracranial bleed, aortic dissection, acute fracture,
+              mass effect, ST-elevation MI pattern, critical arrhythmia.
+- "Priority": consolidation, pleural effusion, organomegaly, suspicious lesion, ACS-pattern ECG.
+- "Routine":  all other studies.
+
+══════════════════════════════════════════
+TASK B — QUESTION GENERATION:
+
+Determine group from the modality you detected, then use the table below for question count:
+
+  GROUP               → COMPLEXITY → QUESTIONS
+  xray                → simple     → 5–6
+  ultrasound          → simple     → 5–6
+  ophthalmology_dental→ simple     → 5–6
+  reports             → simple     → 5–6
+  ct                  → moderate   → 6–8
+  mri                 → moderate   → 6–8
+  pathology           → moderate   → 6–8
+  oncology            → moderate   → 6–8
+  cardiac_functional  → moderate   → 6–8
+  nuclear             → complex    → 8–10
+  specialized         → complex    → 8–10
+
+GROUP → CLINICAL FOCUS (guide which topics to prioritise in questions):
+{group_focus_lines}
+
+QUESTION DESIGN RULES:
+1. Order by diagnostic impact — the question most likely to change differential goes FIRST.
+2. NEVER ask for information already given in the known patient context block.
+3. NEVER ask redundant questions — each must add distinct clinical value.
+4. Types:
+   • "boolean": yes/no, options MUST be exactly ["Yes", "No"] or ["Yes", "No", "Not sure"].
+   • "select": categorical 3–8 options, mutually exclusive, clinically precise.
+   • "text": open answer; MUST include a "placeholder" with a realistic example.
+5. Mark safety-critical questions (contrast allergy, metallic implants, pregnancy,
+   anticoagulants, bleeding risk) with priority = "critical".
+6. Prior-imaging questions must ask date/year AND key findings — not just yes/no.
+7. Every question must include "clinical_rationale" — one sentence: why this changes management.
+8. Cover at minimum: safety/contraindications, symptoms, history, medications, prior imaging.
+
+{_JSON_ENFORCEMENT_BLOCK}
+
+REQUIRED COMBINED OUTPUT SCHEMA (all keys mandatory):
+{{
+  "modality_key": "<one key from approved registry>",
+  "group": "<group id from registry>",
+  "display_name": "<full display name, e.g. 'ECG / 12-lead'>",
+  "confidence": <float 0.0–1.0, 2 decimal places>,
+  "scan_type": "<most specific type, e.g. '12-lead ECG', 'Chest', 'Brain'>",
+  "laterality": "<Left|Right|Bilateral|Midline|NA>",
+  "view": "<AP|PA|Lateral|Axial|Coronal|Sagittal|Oblique|NA>",
+  "image_quality": "<Diagnostic|Suboptimal|Non-diagnostic>",
+  "urgency_flag": "<Routine|Priority|Stat>",
+  "detection_reason": "<one concise clinical sentence ≤ 18 words describing key features seen>",
+  "questions": [
+    {{
+      "id": "q1",
+      "text": "<clinically precise question — max 25 words>",
+      "type": "text|select|boolean",
+      "priority": "critical|high|standard",
+      "category": "symptoms|history|medications|prior_imaging|safety|demographics|indication",
+      "options": ["option1", "option2"] or null,
+      "placeholder": "<realistic example — only for type=text; null otherwise>",
+      "clinical_rationale": "<one sentence: why this answer changes diagnosis or management>"
+    }}
+  ]
+}}"""
+
+
+def detect_and_interrogate_user_prompt() -> str:
+    return """\
+Analyze this medical study. Detect its modality and generate the appropriate clinical questions. \
+Respond with ONLY the JSON object — no other text.
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # INTERNAL HELPER (used inside prompt strings)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -307,6 +450,14 @@ PROMPT_REGISTRY = {
         "user": interrogator_user_prompt,
         "temperature": 0.6,
         "max_tokens": 2500,
+        "response_format": {"type": "json_object"},
+    },
+    # Combined single-pass detect+interrogate (Kimi K2.5 Thinking primary, vision fallbacks).
+    "detect_and_interrogate": {
+        "system": detect_and_interrogate_system_prompt,
+        "user": detect_and_interrogate_user_prompt,
+        "temperature": 0.6,
+        "max_tokens": 4500,
         "response_format": {"type": "json_object"},
     },
 }

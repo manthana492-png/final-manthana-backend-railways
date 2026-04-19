@@ -910,6 +910,221 @@ async def interrogate(
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# /ai/detect-and-interrogate  — Stage 1+2 combined (single LLM call)
+# Primary: Kimi K2.5 Thinking (OpenRouter, vision). Fallbacks: Qwen-VL-72B, GLM-4.5V.
+# Replaces the two-step detect → interrogate round-trip for the auto-detect path.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class DetectAndInterrogateRequest(BaseModel):
+    image_b64: Optional[str] = None
+    image_mime: str = Field(default="image/jpeg")
+    patient_context_json: Optional[str] = None
+    text_context: Optional[str] = None
+
+
+@router.post("/detect-and-interrogate")
+async def detect_and_interrogate(
+    body: DetectAndInterrogateRequest,
+    token_data: dict = Depends(verify_token),
+    x_subscription_tier: Optional[str] = Header(None, alias="X-Subscription-Tier"),
+):
+    """Combined Stage 1+2: detect modality + generate clinical questions in ONE LLM call.
+
+    Uses Kimi K2.5 Thinking (OpenRouter, vision-capable) as primary, with Qwen-VL-72B
+    and GLM-4.5V as cost-effective vision fallbacks.  No NVIDIA NIM is involved.
+    """
+    _require_orch()
+    from rate_limiter import enforce_rate_limit
+
+    uid = _uid(token_data)
+    tier = _tier(x_subscription_tier)
+    enforce_rate_limit(uid, tier)
+
+    from labs_scan_quota import assert_labs_lifetime_quota
+
+    assert_labs_lifetime_quota(uid, tier)
+
+    (
+        _auto,
+        _gm,
+        _reg,
+        get_modality_config,
+        list_for_prompt,
+        validate_modality_key,
+    ) = _registry()
+
+    if not body.image_b64 and not (body.text_context or "").strip():
+        raise HTTPException(status_code=400, detail="image_b64 or text_context required")
+
+    # Reuse existing image preprocessing (DICOM→JPEG/PNG, PDF→text, etc.)
+    try:
+        _preprocess_detect_body(body)  # type: ignore[arg-type]  # shares image_b64/image_mime attrs
+    except HTTPException:
+        raise
+
+    from prompts.interrogator_base import (
+        PROMPT_REGISTRY as _orch_prompt_registry,
+        detect_and_interrogate_system_prompt,
+        detect_and_interrogate_user_prompt,
+    )
+
+    llm = _llm()
+    store = _session()
+    modality_list = list_for_prompt()
+    _iq_ctx = _interrogator_context_from_patient_json(body.patient_context_json)
+
+    sys_p = detect_and_interrogate_system_prompt(
+        modality_list_text=modality_list,
+        patient_age=_iq_ctx.get("patient_age"),
+        patient_sex=_iq_ctx.get("patient_sex"),
+        clinical_context=_iq_ctx.get("clinical_context"),
+    )
+    user_t = detect_and_interrogate_user_prompt()
+
+    _dai_cfg = _orch_prompt_registry["detect_and_interrogate"]
+
+    _dai_latency_ms = 0
+    _dai_cm: Dict[str, Any] = {}
+
+    try:
+        t0 = time.perf_counter()
+        if body.image_b64:
+            r = llm.complete_for_role_chain(
+                "detect_and_interrogate",
+                sys_p,
+                user_t,
+                temperature=float(_dai_cfg["temperature"]),
+                max_tokens=int(_dai_cfg["max_tokens"]),
+                requires_json=True,
+                image_b64=body.image_b64,
+                image_mime=body.image_mime or "image/jpeg",
+                use_web_on_first_openrouter=False,
+                fallback_single_role="detect_interrogate_combined",
+            )
+        else:
+            # Text-only (PDF or report document)
+            user_t = f"{user_t}\n\nDocument text:\n{(body.text_context or '')[:12000]}"
+            r = llm.complete_for_role_chain(
+                "detect_and_interrogate",
+                sys_p,
+                user_t,
+                temperature=float(_dai_cfg["temperature"]),
+                max_tokens=int(_dai_cfg["max_tokens"]),
+                requires_json=True,
+                use_web_on_first_openrouter=False,
+                fallback_single_role="detect_interrogate_combined",
+            )
+        _dai_latency_ms = int((time.perf_counter() - t0) * 1000)
+        _dai_cm = r.get("chain_meta") or {}
+
+        data = _parse_json_obj(str(r.get("content") or ""))
+        mk = str(data.get("modality_key") or "").strip().lower()
+
+        if not mk or mk == "unknown":
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Could not detect modality from image (model returned: {mk!r}). "
+                    "Select modality manually and retry."
+                ),
+            )
+        if not validate_modality_key(mk):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Model returned unrecognised modality_key: {mk!r}",
+            )
+
+        cfg = get_modality_config(mk)
+        if not cfg:
+            raise HTTPException(status_code=502, detail=f"No registry config for: {mk!r}")
+
+        questions = data.get("questions") or []
+        confidence = float(data.get("confidence") or 0.0)
+
+    except HTTPException:
+        log_analysis_event(
+            uid,
+            "detect_and_interrogate",
+            subscription_tier=tier,
+            success=False,
+        )
+        raise
+    except Exception as exc:
+        logger.exception("detect-and-interrogate failed: %s", exc)
+        log_analysis_event(
+            uid,
+            "detect_and_interrogate",
+            subscription_tier=tier,
+            success=False,
+            error_code=503,
+        )
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # Store image in session (same as interrogate; used by /ai/interpret later)
+    sess_b64, sess_mime = _prepare_session_image(
+        body.image_b64,
+        body.image_mime or "image/jpeg",
+        cfg.group,
+    )
+    sid = store.create(
+        image_b64=sess_b64,
+        image_mime=sess_mime,
+        modality_key=cfg.key,
+        display_name=cfg.display_name,
+        group=cfg.group,
+        questions=questions,
+        interrogator_model=str(r.get("model_used", "")),
+        interpreter_role=cfg.interpreter_role,
+        patient_context_json=body.patient_context_json,
+    )
+
+    in_hash = _orch_input_fingerprint(
+        modality_key=cfg.key,
+        image_mime=body.image_mime,
+        image_b64=body.image_b64,
+        session_id=sid,
+    )
+    out_hash = _sha256_text(str(r.get("content") or ""))
+
+    log_analysis_event(
+        uid,
+        "detect_and_interrogate",
+        modality_key=cfg.key,
+        group=cfg.group,
+        subscription_tier=tier,
+        model_used=str(r.get("model_used")),
+        success=True,
+        image_mime=body.image_mime,
+        session_id=sid,
+        stage="detect_and_interrogate",
+        chain_key="detect_and_interrogate",
+        latency_ms=_dai_latency_ms or None,
+        input_sha256=in_hash,
+        output_sha256=out_hash,
+        web_search_used=bool(_dai_cm.get("web_search_used")),
+        chain_attempts=_dai_cm.get("attempts"),
+        model_version=_model_version_for_slug(str(r.get("model_used") or "")),
+    )
+
+    out: Dict[str, Any] = {
+        "session_id": sid,
+        "modality_key": cfg.key,
+        "group": cfg.group,
+        "display_name": cfg.display_name,
+        "confidence": confidence,
+        "low_confidence": confidence < 0.50,
+        "questions": questions,
+        "model_used": r.get("model_used"),
+    }
+    for _k in ("scan_type", "laterality", "view", "image_quality", "urgency_flag", "detection_reason"):
+        v = data.get(_k)
+        if v is not None and str(v).strip():
+            out[_k] = v
+    return out
+
+
 @router.post("/interpret")
 async def interpret(
     body: InterpretRequest,
