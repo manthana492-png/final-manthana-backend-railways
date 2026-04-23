@@ -1,8 +1,12 @@
 # Report assembly for Railway / production: shared + cloud_inference + manthana-inference.
 #
-# Build context MUST be `this_studio` (contains packages/, config/, and manthana-backend path):
-#   cd this_studio
-#   docker build -f "new manthana radiology/manthana-backend/services/report_assembly/Dockerfile.railway" -t manthana-report-assembly .
+# Build context is the repository root (contains packages/, config/, and
+# "new manthana radiology/"). Railway is configured via railway.toml to use
+# the repo root as build context with this Dockerfile.
+#
+# Local equivalent:
+#   docker build -f "new manthana radiology/manthana-backend/services/report_assembly/Dockerfile.railway" \
+#     -t manthana-report-assembly .
 
 FROM python:3.11-slim
 
@@ -20,6 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Create config directory before copying into it
+RUN mkdir -p /app/config /app/packages
+
 COPY ["packages/manthana-inference", "/app/packages/manthana-inference"]
 COPY ["config/cloud_inference.yaml", "/app/config/cloud_inference.yaml"]
 
@@ -27,13 +34,14 @@ RUN pip install --no-cache-dir -U pip setuptools wheel \
     && pip install --no-cache-dir -e /app/packages/manthana-inference \
     && pip install --no-cache-dir "instructor>=1.0.0"
 
+# NOTE: Paths below contain spaces — JSON array syntax is required.
 COPY ["new manthana radiology/manthana-backend/services/report_assembly/requirements.txt", "/tmp/ra-requirements.txt"]
 # Install torch CPU-only first (smaller size), then install other requirements
 RUN pip install --no-cache-dir torch==2.6.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r /tmp/ra-requirements.txt
 
-COPY ["new manthana radiology/manthana-backend/shared", "/app/shared"]
-COPY ["new manthana radiology/manthana-backend/services/report_assembly", "/app"]
+COPY ["new manthana radiology/manthana-backend/shared/", "/app/shared/"]
+COPY ["new manthana radiology/manthana-backend/services/report_assembly/", "/app/"]
 
 ENV MANTHANA_LLM_REPO_ROOT=/app
 ENV PYTHONPATH=/app:/app/shared
